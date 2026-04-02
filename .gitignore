@@ -1,0 +1,7 @@
+/myenv/*
+/vosk-model/*
+/vosk-model-small-en-us-0.15/*
+/__pycache__/*
+.env
+
+*/__pycache__/*
