@@ -2,8 +2,10 @@ import os
 import dotenv
 
 dotenv.load_dotenv()
+
 # Model configuration
-DEFAULT_MODEL = os.getenv("LLM_MODEL")
+OFFLINE_MODE = os.getenv("LLM_MODEL")
+CLOUD_MODE = os.environ.get("GOOGLE_API_KEY")
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

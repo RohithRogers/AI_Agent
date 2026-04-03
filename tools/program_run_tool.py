@@ -12,7 +12,8 @@ import os
             "language":{"type":"string","description":"The language of the program."}
         },
         "required": ["path","language"]
-    }
+    },
+    requires_permission=True
 )
 def run_program(path,language):
     try:
@@ -33,3 +34,23 @@ def run_program(path,language):
             return f"Error: Language '{language}' is not supported."
     except Exception as e:
         return f"Error running program: {str(e)}"
+
+
+@tool(
+    name="command_executor",
+    description="Executes a command in the terminal.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "The command to execute."}
+        },
+        "required": ["command"]
+    },
+    requires_permission=True
+)
+def command_executor(command):
+    try:
+        result = subprocess.run(command,shell=True,capture_output=True,text=True)
+        return result.stdout
+    except Exception as e:
+        return f"Error executing command: {str(e)}"
