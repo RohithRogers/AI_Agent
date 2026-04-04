@@ -22,25 +22,27 @@ async def _load_mcp_from_env():
         if cmd:
             await mcp_manager.add_server(name, cmd)
 
+def show_welcome_panel(agent, current_mode):
+    console.print(Panel(f"[bold blue]AI Agent CLI Ready[/bold blue]\n\n"
+                        f"[bold cyan]Mode:[/bold cyan] {agent.mode}\n[bold cyan]Context:[/bold cyan] {current_mode}\n"
+                        f"[bold cyan]Model:[/bold cyan] {agent.model}\n\n"
+                        f"[bold cyan]Slash Commands:[/bold cyan]\n"
+                        "  /chat   - Chat Mode\n"
+                        "  /run    - Run Mode (Code only)\n"
+                        "  /voice  - Voice Input\n"
+                        "  /cls    - Clear Screen\n"
+                        "  /help   - List all commands\n"
+                        "  /exit   - Close CLI", title="System"))
+
 def start_chat(mode="offline"):
     # Define our two mode prompts
     CHAT_MODE_PROMPT = "You are a helpful AI assistant with access to local tools. Use markdown for code and lists."
     RUN_MODE_PROMPT = "You are a technical assistant. If code is requested, return ONLY raw executable code without markdown, comments, or explanations."
     
-    current_mode = mode
+    current_mode = "chat"
     agent = ChatAgent(system_prompt=CHAT_MODE_PROMPT,mode=mode)
     
-    console.print(Panel("[bold blue]AI Agent CLI Ready[/bold blue]\n\n"
-                        "[bold cyan]Mode:[/bold cyan] {current_mode}\n\n [bold cyan]Model:[/bold cyan] {agent.model}\n\n"
-                        "[bold cyan]Slash Commands:[/bold cyan]\n"
-                        "  /chat   - Switch to Chat Mode (conversational)\n"
-                        "  /run    - Switch to Run Mode (code only)\n"
-                        "  /voice  - Speak to the Agent (Microphone)\n"
-                        "  /mcp <name> <cmd> - Add an MCP Server dynamically\n"
-                        "  /save   - Save conversation history\n"
-                        "  /clear  - Clear history\n"
-                        "  /list_models - List all local models\n"
-                        "  /exit   - Close CLI", title="System"))
+    show_welcome_panel(agent, current_mode)
     
     # Load initial MCP servers
     asyncio.run(_load_mcp_from_env())
@@ -50,7 +52,7 @@ def start_chat(mode="offline"):
         try:
             # Show current mode in the prompt
             mode_color = "cyan" if current_mode == "chat" else "red"
-            user_input = console.input(f"[bold green]User[/bold green] [[{mode_color}]{current_mode}[/{mode_color}]] [bold green]❯ [/bold green]").strip()
+            user_input = console.input(f"[bold green]User[/bold green] [({agent.mode}) [{mode_color}]{current_mode}[/{mode_color}]] [bold green]❯ [/bold green]").strip()
             
             if not user_input:
                 continue
@@ -59,18 +61,65 @@ def start_chat(mode="offline"):
             if user_input.startswith("/"):
                 cmd = user_input.lower()
                 if cmd == "/voice":
-                    from tools.voice_handler import get_voice_input
-                    voiced_text = get_voice_input()
-                    if voiced_text:
-                        console.print(f"[bold cyan]You (Voice) ❯[/bold cyan] {voiced_text}")
-                        user_input = voiced_text
-                    else:
-                        console.print("[bold red]No speech detected.[/bold red]")
+                    while True:
+                        console.print("[bold cyan]Voice Mode Activated. Type ctrl-C to exit voice mode.[/bold cyan]")
+                        from tools.voice_handler import get_voice_input
+                        try:
+                            voiced_text = get_voice_input()
+                            if voiced_text:
+                                console.print(f"[bold cyan]You (Voice) ❯[/bold cyan] {voiced_text}")
+                                # Check if they said a command
+                                if voiced_text.startswith("/"):
+                                    user_input = voiced_text
+                                    break
+                                # If it's just text, we send it to agent.run(user_input)
+                                user_input = voiced_text
+                                break
+                            else:
+                                console.print("[bold red]No speech detected.[/bold red]")
+                                continue
+                        except KeyboardInterrupt:
+                            console.print("[bold cyan]Voice Mode Exited.[/bold cyan]")
+                            break
+                    if not user_input:
                         continue
                 elif cmd == "/exit":
                     console.print("[bold yellow]Exiting...[/bold yellow]")
                     t.sleep(1)
                     break
+                elif cmd == "/cls":
+                    os.system('cls' if os.name == 'nt' else 'clear')
+                    show_welcome_panel(agent, current_mode)
+                    continue
+                elif cmd == "/help":
+                    help_content = (
+                        "[bold cyan]Available Commands:[/bold cyan]\n"
+                        "  /chat           - Switch to CHAT Mode (conversational)\n"
+                        "  /run            - Switch to RUN Mode (direct code execution)\n"
+                        "  /voice          - Interactive voice input mode\n"
+                        "  /cls            - Clear console screen (keeps history)\n"
+                        "  /online         - Use Gemini Cloud API (Advanced capabilities)\n"
+                        "  /offline        - Use Ollama Local LLMs (Private & Free)\n"
+                        "  /set_model <m>  - Switch the current model (e.g., deepseek-coder)\n"
+                        "  /list_models    - See available local/online models\n"
+                        "  /mcp <n> <c>    - Connect an MCP Tool Server\n"
+                        "  /save           - Save current conversation to JSON\n"
+                        "  /clear          - Clear conversation history\n"
+                        "  /help           - Show this command list\n"
+                        "  /exit           - Close the application"
+                    )
+                    console.print(Panel(help_content, title="Help Menu", border_style="green"))
+                    continue
+                elif cmd == "/online":
+                    current_mode = "chat"
+                    agent.set_mode("online")
+                    console.print(f"[bold green]Mode switched to ONLINE (Model: {agent.model})[/bold green]")
+                    continue
+                elif cmd == "/offline":
+                    current_mode = "chat"
+                    agent.set_mode("offline")
+                    console.print(f"[bold red]Mode switched to OFFLINE (Model: {agent.model})[/bold red]")
+                    continue
                 elif cmd == "/chat":
                     current_mode = "chat"
                     agent.set_system_prompt(CHAT_MODE_PROMPT)
@@ -100,13 +149,24 @@ def start_chat(mode="offline"):
                     import json
                     filename = f"chat_save_{int(t.time())}.json"
                     with open(filename, "w") as f:
-                        json.dump(agent.messages, f, indent=2)
-                    console.print(f"[bold green]Conversation saved to {filename}[/bold green]")
+                        # Filter out system messages as requested
+                        save_history = [m for m in agent.messages if m["role"] != "system"]
+                        json.dump(save_history, f, indent=2)
+                    console.print(f"[bold green]Conversation saved to {filename} (system prompts excluded)[/bold green]")
                     continue
                 elif cmd == "/list_models":
                     console.print("[bold cyan]Local Models:[/bold cyan]")
                     for model in agent.get_available_models():
                         console.print(f"  - {model}")
+                    continue
+                elif cmd.startswith("/set_model"):
+                    parts = user_input.split(maxsplit=1)
+                    if len(parts) >= 2:
+                        model = parts[1].strip()
+                        agent.set_model(model)
+                        console.print(f"[bold green]Model set to {model}[/bold green]")
+                    else:
+                        console.print("[yellow]Usage: /set_model <model>[/yellow]")
                     continue
                 else:
                     console.print(f"[bold red]Unknown command: {cmd}[/bold red]")
@@ -144,13 +204,11 @@ def start_chat(mode="offline"):
                                 live.update(Group(
                                     prefix_text,
                                     Markdown(full_response),
-                                    f"[dim italic yellow]{current_status}[/dim italic yellow]"
+                                    f"\n [italic yellow]⚡ {current_status}[/italic yellow]"
                                 ))
                                 chunk = next(gen)
                             else:
                                 if chunk is not None:
-                                    # If we were showing a status, clear it or update it?
-                                    # Usually we clear status when new text comes.
                                     if current_status:
                                         current_status = "" 
 
@@ -159,15 +217,15 @@ def start_chat(mode="offline"):
                                     
                                     live.update(Group(
                                         prefix_text,
-                                        Markdown(clean_response),
-                                        f"[dim cyan]{current_status}[/dim cyan]" if current_status else ""
+                                        Markdown(clean_response)
                                     ))
                                 
                                 chunk = next(gen)
                     except StopIteration:
-                        pass
+                        # Update Live display one final time with just the response
+                        live.update(Markdown(full_response))
                 except KeyboardInterrupt:
-                    live.update(Group(prefix_text, full_response + " [dim](stopped)[/dim]"))
+                    live.update(Markdown(full_response + " [dim](stopped)[/dim]"))
             
             console.print()
         except KeyboardInterrupt:
@@ -210,8 +268,9 @@ def main():
                             tool_params = parts[2]
                             
                             live.stop()
-                            console.print(f"\n[bold yellow]🛡️ Permission Required:[/bold yellow] Tool [bold cyan]{tool_name}[/bold cyan] called with parameters [dim]{tool_params}[/dim]")
-                            choice = console.input("[bold green]Allow? (Y/n): [/bold green]").strip().lower()
+                            console.print(Panel(f"Agent wants to use [bold cyan]{tool_name}[/bold cyan]\n[dim]Params: {tool_params}[/dim]", 
+                                                title="🛡️ Permission Required", border_style="yellow", expand=False))
+                            choice = console.input("[bold green]Confirm? (Y/n): [/bold green]").strip().lower()
                             approved = choice in ["", "y", "yes"]
                             
                             live.start()
@@ -220,7 +279,7 @@ def main():
                             current_status = chunk.replace("__UI_STATUS__:", "")
                             live.update(Group(
                                 Markdown(full_response),
-                                f"[dim italic yellow]{current_status}[/dim italic yellow]"
+                                f"\n [italic yellow]⚡ {current_status}[/italic yellow]"
                             ))
                             chunk = next(gen)
                         else:
@@ -228,12 +287,8 @@ def main():
                                 if current_status:
                                     current_status = "" 
                                 full_response += chunk
-                                # Ensure markdown fences are handled correctly even in run mode
                                 clean_response = full_response.replace("```", "\n```\n").replace("\n\n```", "\n```")
-                                live.update(Group(
-                                    Markdown(clean_response),
-                                    f"[dim cyan]{current_status}[/dim cyan]" if current_status else ""
-                                ))
+                                live.update(Markdown(clean_response))
                             chunk = next(gen)
                 except StopIteration:
                     pass

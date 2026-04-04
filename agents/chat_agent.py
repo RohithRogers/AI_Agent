@@ -64,6 +64,29 @@ class ChatAgent(BaseAgent):
                 "parts": [{"text": msg["content"]}]
             })
         return gemini_messages
+
+    def set_model(self, model):
+        """Sets the model to use and refreshes tools."""
+        self.model = model
+        self._update_tools_prompt()
+
+    def set_mode(self, mode):
+        """Sets the mode (online/offline) and refreshes tools."""
+        if self.mode == mode:
+            return
+        
+        self.mode = mode
+        if self.mode != "offline":
+            if not hasattr(self, 'client'):
+                from config import CLOUD_MODE
+                self.client = genai.Client(api_key=CLOUD_MODE)
+            # Ensure a valid Gemini model is selected if current model is local
+            if "gemini" not in self.model.lower():
+                self.model = "gemini-3-flash-preview"
+        else:
+            self.model = "deepseek-coder"
+        
+        self._update_tools_prompt()
     
     def get_available_models(self):
         """Returns a list of available models."""
@@ -80,33 +103,45 @@ class ChatAgent(BaseAgent):
                 # For simplicity in this implementation, we stream and buffer. 
                 # If the buffer looks like a tool call, we handle it.
                 full_content = ""
-                if self.mode == "offline":
-                    stream = ollama.chat(model=self.model, messages=self.messages, stream=True)
-                else:
-                    gemini_msgs = self._get_gemini_messages()
-                    system_instr = self.messages[0]["content"] if self.messages[0]["role"] == "system" else ""
-                    stream = self.client.models.generate_content_stream(
-                        model=self.model, 
-                        contents=gemini_msgs,
-                        config={"system_instruction": system_instr}
-                    )
-                
-                is_tool_call = False
-                for chunk in stream:
+                try:
                     if self.mode == "offline":
-                        token = chunk['message']['content']
+                        stream = ollama.chat(model=self.model, messages=self.messages, stream=True)
                     else:
-                        token = chunk.text or ""
+                        gemini_msgs = self._get_gemini_messages()
+                        system_instr = self.messages[0]["content"] if self.messages[0]["role"] == "system" else ""
+                        stream = self.client.models.generate_content_stream(
+                            model=self.model, 
+                            contents=gemini_msgs,
+                            config={"system_instruction": system_instr}
+                        )
                     
-                    full_content += token
-                    
-                    # If we haven't decided it's a tool yet, check the start
-                    if not is_tool_call and '{"tool":' in full_content:
-                        is_tool_call = True
-                        # If it's a tool call, we stop yielding tokens to the UI
-                    
-                    if not is_tool_call:
-                        yield token
+                    is_tool_call = False
+                    for chunk in stream:
+                        if self.mode == "offline":
+                            token = chunk['message']['content']
+                        else:
+                            token = chunk.text or ""
+                        
+                        full_content += token
+                        
+                        # If we haven't decided it's a tool yet, check the start
+                        if not is_tool_call and '{"tool":' in full_content:
+                            is_tool_call = True
+                            # If it's a tool call, we stop yielding tokens to the UI
+                        
+                        if not is_tool_call:
+                            yield token
+                except Exception as e:
+                    err_str = str(e)
+                    if "503" in err_str or "high demand" in err_str.lower():
+                        yield f"__UI_STATUS__:🚨 Model Overloaded: The API is currently experiencing high demand. Please try again in a few seconds."
+                    elif "429" in err_str:
+                        yield f"__UI_STATUS__:🚨 Quota Exceeded: You've reached the rate limit. Please wait before asking again."
+                    elif "401" in err_str or "API_KEY_INVALID" in err_str:
+                        yield f"__UI_STATUS__:🔑 Authentication Error: Your API key is invalid or expired."
+                    else:
+                        yield f"__UI_STATUS__:❌ Model Error: {err_str}"
+                    break
 
                 if is_tool_call:
                     try:
@@ -118,32 +153,24 @@ class ChatAgent(BaseAgent):
                         tool_name = tool_data["tool"]
                         tool_params = tool_data.get("parameters", {})
                         
-                        console.log(f"🔧 [bold yellow]Tool Triggered:[/bold yellow] {tool_name}")
-                        console.log(f"📝 [dim]Parameters:[/dim] {tool_params}")
-                        
-                        # Yield a status message
-                        yield f"__UI_STATUS__:⚙️ Executing {tool_name}..."
+                        # Yield a cleaner status message for the UI
+                        params_hint = json.dumps(tool_params)[:50] + "..." if len(json.dumps(tool_params)) > 50 else json.dumps(tool_params)
+                        yield f"__UI_STATUS__:🛠️ Call [bold cyan]{tool_name}[/bold cyan] [dim]{params_hint}[/dim]"
                         
                         # Check for permission
                         tool_info = registry.tools.get(tool_name)
                         if tool_info and tool_info.get("requires_permission"):
-                            # Signal that we need permission. 
-                            # We'll use a special string prefix that the CLI can catch.
-                            # The consumer should .send() back the result.
                             approved = (yield f"__ASK_PERMISSION__:{tool_name}:{json.dumps(tool_params)}")
                             if not approved:
                                 result = "Error: User denied permission to execute this tool."
-                                console.log(f"🚫 [bold red]Permission Denied:[/bold red] {tool_name}")
                             else:
                                 result = registry.execute_tool(tool_name, tool_params)
-                                console.log(f"✅ [bold green]Permission Granted:[/bold green] {tool_name}")
                         else:
                             result = registry.execute_tool(tool_name, tool_params)
                         
                         # Feed the result back
                         self.add_message("assistant", full_content)
                         self.add_message("user", f"Tool '{tool_name}' returned: {result}")
-                        console.log(f"✅ [green]Tool result added to context.[/green]")
                         continue # Let the LLM process the result
                     except Exception as e:
                         yield f"__UI_STATUS__:❌ Error parsing tool call: {e}"
