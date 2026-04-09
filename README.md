@@ -25,24 +25,19 @@ A powerful, extensible, and modular Command-Line Interface (CLI) AI agent framew
   ```
 - **Vosk Model**: (Optional, for voice) Download a Vosk model (e.g., `vosk-model-small-en-us-0.15`) and place it in the project root.
 
-### Installation
+### Quick Start (Windows)
 
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/RohithRogers/AI_Agent.git
-   cd AI_Agent
-   ```
+If you are on Windows, you can use the automated launcher to set up the environment and start the agent:
 
-2. **Create a virtual environment**:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+```batch
+run_agent.bat chat
+```
+This script will:
+1. Create a virtual environment (`myenv`) if it doesn't exist.
+2. Install all required dependencies from `requirements.txt`.
+3. Launch the AI Agent in chat mode.
 
-3. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+### Manual Installation
 
 4. **Configure environment variables**:
    Create a `.env` file in the root directory:

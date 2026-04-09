@@ -30,12 +30,29 @@
 #     except StopIteration:
 #         pass
 #     print()
-import difflib
 
-with open('garden.txt', 'r') as f1, open('edited.txt', 'r') as f2:
-    original = f1.readlines()
-    edited = f2.readlines()
 
-hd = difflib.HtmlDiff()
-with open('diff.html', 'w') as f:
-    f.write(hd.make_file(original, edited))
+# import difflib
+
+# with open('garden.txt', 'r') as f1, open('edited.txt', 'r') as f2:
+#     original = f1.readlines()
+#     edited = f2.readlines()
+
+# hd = difflib.HtmlDiff()
+# with open('diff.html', 'w') as f:
+#     f.write(hd.make_file(original, edited))
+
+from google import genai
+from config import CLOUD_MODE
+
+client = genai.Client(api_key=CLOUD_MODE)
+
+try:
+    response = client.models.generate_content_stream(
+        model="gemini-3.1-flash-lite-preview",
+        contents="Hey gemini check for free online internships providing by google",
+    )
+    for chunk in response:
+        print(chunk.text, end="", flush=True)
+except Exception as e:
+    print(e)

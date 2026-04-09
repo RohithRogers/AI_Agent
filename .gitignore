@@ -5,3 +5,42 @@
 .env
 
 */__pycache__/*
+
+# Ignore Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignore virtual environment
+myenv/
+venv/
+.venv/
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore documentation/build artifacts if any
+docs/_build/
+build/
+dist/
+
+# Ignore logs
+*.log
+
+# Ignore temporary files
+*.tmp
+*.temp
+
+# Ignore agent created files
+/blockchain_crypto_project
+/computer_vision
+test_gemini_history.py
+kmeans_viz.py
+

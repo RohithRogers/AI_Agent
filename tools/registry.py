@@ -27,15 +27,20 @@ class ToolRegistry:
         ]
 
     def execute_tool(self, name, parameters):
-        """Executes a tool by name with provided parameters. Supports both sync and async functions."""
+        """Executes a tool by name. Returns result or a generator for streaming output."""
         if name in self.tools:
-            func = self.tools[name]["func"]
+            tool_info = self.tools[name]
+            func = tool_info["func"]
             try:
+                # Handle async functions
                 if inspect.iscoroutinefunction(func):
-                    # For async tools, we use asyncio.run to bridge to sync code
-                    # Note: This works because the agent is currently synchronous
                     return asyncio.run(func(**parameters))
-                return func(**parameters)
+                
+                # Execute the function
+                result = func(**parameters)
+                
+                # Return direct result or generator
+                return result
             except Exception as e:
                 return f"Error executing tool '{name}': {str(e)}"
         return f"Error: Tool '{name}' not found."

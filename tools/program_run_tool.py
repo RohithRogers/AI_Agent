@@ -1,44 +1,40 @@
 from tools.registry import tool
-import subprocess
+from tools.terminal_manager import terminal_manager
 import os
 
 @tool(
-    name="run_program",
-    description="Runs a program at the specified path.",
+    name="program_run",
+    description="Runs a program (Python, C, C++).",
     parameters={
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "The full path to the program."},
-            "language":{"type":"string","description":"The language of the program."}
+            "path": {"type": "string", "description": "The path to the source file."},
+            "language": {"type": "string", "description": "The language (python, c, cpp)."}
         },
-        "required": ["path","language"]
+        "required": ["path", "language"]
     },
     requires_permission=True
 )
-def run_program(path,language):
-    try:
-        if not os.path.exists(path):
-            return f"Error: Program '{path}' does not exist."
-        if language == "python":
-            result = subprocess.run(["python", path],capture_output=True,text=True)
-            return result.stdout
-        elif language == "c":
-            compiled = subprocess.run(["gcc", path],capture_output=True,text=True)
-            result = subprocess.run(["./a.exe"],capture_output=True,text=True)
-            return result.stdout
-        elif language == "cpp":
-            compiled = subprocess.run(["g++", path],capture_output=True,text=True)
-            result = subprocess.run(["./a.exe"],capture_output=True,text=True)
-            return result.stdout
-        else:
-            return f"Error: Language '{language}' is not supported."
-    except Exception as e:
-        return f"Error running program: {str(e)}"
+def program_run(path, language):
+    if not os.path.exists(path):
+        return f"Error: File '{path}' not found."
+    
+    if language == "python":
+        cmd = f"python {path}"
+    elif language == "c":
+        cmd = f"gcc {path} -o temp_app.exe; if ($?) {{ ./temp_app.exe }}"
+    elif language == "cpp":
+        cmd = f"g++ {path} -o temp_app.exe; if ($?) {{ ./temp_app.exe }}"
+    else:
+        return f"Error: Language '{language}' is not supported."
+    
+    # Yield each line of output as it arrives
+    yield from terminal_manager.execute_stream(cmd)
 
 
 @tool(
     name="command_executor",
-    description="Executes a command in the terminal.",
+    description="Executes a powershell command in the persistent session.",
     parameters={
         "type": "object",
         "properties": {
@@ -49,8 +45,4 @@ def run_program(path,language):
     requires_permission=True
 )
 def command_executor(command):
-    try:
-        result = subprocess.run(command,shell=True,capture_output=True,text=True)
-        return result.stdout
-    except Exception as e:
-        return f"Error executing command: {str(e)}"
+    yield from terminal_manager.execute_stream(command)

@@ -37,6 +37,9 @@ def get_webpage_content(url: str) -> str:
 def search_web(query: str) -> str:
     """Uses DDGS to search for quick results/snippets."""
     try:
+        import warnings
+        warnings.filterwarnings("ignore", category=RuntimeWarning, message="This package .* has been renamed to .*")
+        
         from duckduckgo_search import DDGS
         results = ""
         with DDGS() as ddgs:
