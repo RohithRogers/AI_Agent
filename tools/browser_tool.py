@@ -38,13 +38,14 @@ def search_web(query: str) -> str:
     """Uses DDGS to search for quick results/snippets."""
     try:
         import warnings
-        warnings.filterwarnings("ignore", category=RuntimeWarning, message="This package .* has been renamed to .*")
-        
-        from duckduckgo_search import DDGS
-        results = ""
-        with DDGS() as ddgs:
-            for r in ddgs.text(query, max_results=5):
-                results += f"Title: {r['title']}\nSnippet: {r['body']}\nURL: {r['href']}\n\n"
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            from duckduckgo_search import DDGS
+            
+            results = ""
+            with DDGS() as ddgs:
+                for r in ddgs.text(query, max_results=5):
+                    results += f"Title: {r['title']}\nSnippet: {r['body']}\nURL: {r['href']}\n\n"
         
         return results if results else "No results found for your query."
     except ImportError:

@@ -24,15 +24,48 @@ class ChatAgent(BaseAgent):
         
         super().__init__(model, self.base_system_prompt + self.tools_prompt)
         
-        self.online_models = ["gemini-3.1-flash-lite-preview", "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro"]
+        self.online_models = []
+        self.fallback_models = []
+        
+        # History management settings
+        self.max_history_messages = 20
+        self.retain_messages = 6
         
         # Initialize GenAI client if in online mode
         if self.mode != "offline":
             from config import CLOUD_MODE
             self.client = genai.Client(api_key=CLOUD_MODE)
-            # Ensure model is a gemini model if none provided
-            if "gemini" not in self.model.lower():
-                self.model = self.online_models[0]
+            self._fetch_online_models()
+            # Ensure model is a valid model if none provided
+            if "gemini" not in self.model.lower() and "gemma" not in self.model.lower():
+                self.model = self.online_models[0] if self.online_models else "gemini-2.0-flash"
+
+    def _fetch_online_models(self):
+        """Fetches available models from the API and categorizes them."""
+        try:
+            all_models = self.client.models.list()
+            # Most Gemini/Gemma models support generation. We filter out embeddings and other specialty models.
+            self.online_models = []
+            for m in all_models:
+                name = m.name.replace("models/", "")
+                # Skip embedding and other non-chat models
+                if any(x in name for x in ["embedding", "aqa", "lyria", "robotics", "computer-use"]):
+                    continue
+                self.online_models.append(name)
+            
+            # Prioritize Gemma models as fallbacks
+            self.fallback_models = [m for m in self.online_models if "gemma" in m.lower()]
+            # Ensure gemma-4-31b-it is high in fallback priority if it exists
+            self.fallback_models.sort(key=lambda x: "gemma-4" in x.lower() or "gemma-3" in x.lower(), reverse=True)
+            
+            # If no gemma models, use flash-lite as fallback
+            if not self.fallback_models:
+                self.fallback_models = [m for m in self.online_models if "flash-lite" in m.lower()]
+        except Exception as e:
+            console.log(f"[warning]Failed to fetch online models: {e}[/warning]")
+            # Fallback to hardcoded list if API call fails
+            self.online_models = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemma-2-9b-it"]
+            self.fallback_models = ["gemma-2-9b-it"]
 
     def set_system_prompt(self, new_prompt):
         """Updates the system prompt while maintaining the message structure."""
@@ -53,13 +86,14 @@ Your actions persist (e.g., changing directories, installing packages).
 
 TASK EXECUTION FLOW:
 1. REASON: Explain your plan inside <thought>...</thought> tags.
-2. ACT: Execute a tool (JSON) IMMEDIATELY after reasoning if the task is not done.
-3. FINISH: Only provide a final summary IF the task is fully verified and complete.
+2. ACT: Execute ONE tool (JSON) per response if the task is not done.
+3. OBSERVE: Receive the tool output and then decide on the next action.
+4. FINISH: Only provide a final summary IF the task is fully verified and complete.
 
 IMPORTANT RULES:
 - If you say you will do something, you MUST execute the tool in the same response.
 - NEVER ask "Would you like me to...". Just do it.
-- Your goal is to reach the goal, not just to plan.
+- For complex tasks with multiple steps, perform ONE tool call at a time. I will show you the result, then you call the next tool.
 
 TOOL CALL FORMAT (for local models):
 To use a tool, output a JSON object. 
@@ -102,29 +136,49 @@ AVAILABLE TOOLS:
             tool_response = msg.get("tool_response")
             
             parts = []
+            
+            if "gemini_attachments" in msg:
+                for att in msg["gemini_attachments"]:
+                    parts.append(att)
+                    
             if content and not tool_call_part:
-                parts.append(types.Part(text=content))
+                parts.append(types.Part.from_text(text=content))
             elif content and tool_call_part:
-                parts.append(types.Part(text=content))
+                parts.append(types.Part.from_text(text=content))
                 
             if tool_call_part:
                 parts.append(tool_call_part)
             
             if tool_call:
                 # Legacy handling for offline or older models without native part
-                parts.append(types.Part(function_call=types.FunctionCall(
+                parts.append(types.Part.from_function_call(
                     name=tool_call["name"],
                     args=tool_call["args"]
-                )))
+                ))
             
             if tool_response:
+                # Get ID but allow it to be None
                 func_id = tool_response.get("id")
-                parts.append(types.Part(function_response=types.FunctionResponse(
-                    id=func_id,
-                    name=tool_response["name"],
-                    response={"result": str(tool_response["content"])}
-                )))
-                role = "user" # Responses are sent as 'user' turn with parts containing FunctionResponse
+                
+                # Format name and response correctly
+                resp_name = tool_response["name"]
+                # response must be a dictionary
+                resp_content = tool_response["content"]
+                if not isinstance(resp_content, (dict, list, str, int, float, bool)):
+                    resp_content = str(resp_content)
+                
+                # Check for "auth error" related issues: 
+                # Some models expect a specific key structure or no ID if not provided in call
+                parts.append(types.Part.from_function_response(
+                    name=resp_name,
+                    response={"result": resp_content}
+                ))
+                
+                # Only set ID if it was originally provided to avoid malformed requests
+                if func_id:
+                    parts[-1].function_response.id = func_id
+                
+                role = "user" 
 
             if not parts:
                 continue
@@ -135,6 +189,58 @@ AVAILABLE TOOLS:
                 gemini_messages.append(types.Content(role=role, parts=parts))
                 
         return gemini_messages
+
+    def _summarize_history(self):
+        """Compresses long conversation history into a summary to save tokens."""
+        if len(self.messages) <= self.max_history_messages:
+            return
+
+        # Keep system prompt (index 0) and the most recent N messages
+        system_msg = self.messages[0]
+        recent_messages = self.messages[-self.retain_messages:]
+        messages_to_summarize = self.messages[1:-self.retain_messages]
+
+        if not messages_to_summarize:
+            return
+
+        summary_prompt = "Summarize the following conversation history into a concise list of key points and important context. Focus on what has been accomplished and current state. Reply ONLY with the summary.\n\n"
+        for msg in messages_to_summarize:
+            role = msg["role"]
+            content = msg.get("content", "")
+            if not content and "tool_call" in msg:
+                content = f"[Tool Call: {msg['tool_call']['name']}]"
+            elif not content and "tool_call_part" in msg:
+                 content = f"[Tool Call: {msg['tool_call_part'].function_call.name}]"
+            elif not content and "tool_response" in msg:
+                 content = f"[Tool Response: {msg['tool_response']['name']}]"
+            summary_prompt += f"{role.upper()}: {content}\n"
+
+        try:
+            console.log("[info]Summarizing history to save tokens...[/info]")
+            if self.mode == "offline":
+                resp = ollama.chat(model=self.model, messages=[
+                    {"role": "user", "content": summary_prompt}
+                ])
+                summary = resp['message']['content']
+            else:
+                # Use a lightweight model for summarization if possible
+                summary_model = "gemini-2.0-flash-lite" if "gemini" in self.model.lower() else self.model
+                resp = self.client.models.generate_content(
+                    model=summary_model,
+                    contents=summary_prompt
+                )
+                summary = resp.text
+
+            new_summary_msg = {
+                "role": "user", 
+                "content": f"[Previous Conversation Summary: {summary}]"
+            }
+            
+            # Reconstruct history: System + Summary + Recent
+            self.messages = [system_msg, new_summary_msg] + recent_messages
+            console.log("[info]History summarized successfully.[/info]")
+        except Exception as e:
+            console.log(f"[warning]Failed to summarize history: {e}[/warning]")
 
     def set_model(self, model):
         """Sets the model to use and refreshes tools."""
@@ -151,9 +257,10 @@ AVAILABLE TOOLS:
             if not hasattr(self, 'client'):
                 from config import CLOUD_MODE
                 self.client = genai.Client(api_key=CLOUD_MODE)
+            self._fetch_online_models()
             # Ensure a valid Gemini model is selected if current model is local
-            if "gemini" not in self.model.lower():
-                self.model = self.online_models[0]
+            if "gemini" not in self.model.lower() and "gemma" not in self.model.lower():
+                self.model = self.online_models[0] if self.online_models else "gemini-2.0-flash"
         else:
             self.model = "deepseek-coder"
         
@@ -163,11 +270,64 @@ AVAILABLE TOOLS:
         """Returns a list of available models."""
         return self.available_models
 
-    def run(self, user_input):
+    def run(self, user_input, attachments=None):
+        if attachments is None:
+            attachments = []
+            
         console.log(f"[info]Input Received:[/info] {user_input[:50]}...")
-        self.add_message("user", user_input)
         
-        console.log(f"Streaming from model: [italic]{self.model}[/italic]...")
+        uploaded_attachments = []
+        if attachments and self.mode != "offline":
+            import os
+            for path in attachments:
+                if os.path.exists(path):
+                    # For UI feedback during upload, we would yield here, but run() is a generator
+                    # so we will just log it for now and it will block briefly.
+                    console.log(f"[info]Uploading attachment:[/info] {os.path.basename(path)}")
+                    uploaded_file = self.client.files.upload(file=path)
+                    uploaded_attachments.append(uploaded_file)
+                else:
+                    console.log(f"[warning]File not found:[/warning] {path}")
+
+        new_msg = {"role": "user", "content": user_input}
+        if uploaded_attachments:
+            new_msg["gemini_attachments"] = uploaded_attachments
+        
+        # Optional: For Ollama, we might be able to add images directly using base64, 
+        # but requires specific keys. We skip for offline right now or handle later if requested.
+        
+        self.messages.append(new_msg)
+        
+        if getattr(self, "auto_route", False) and self.mode != "offline":
+            try:
+                yield f"__UI_STATUS__:🤔 [dim]Routing task...[/dim]"
+                route_prompt = f"Given the user request, classify intent/complexity as 'IMAGE_GEN' (generating pictures/images), 'VIDEO_GEN' (generating videos), 'COMPLEX' (testing, planning, deep reasoning), 'MODERATE' (coding, summaries) or 'SIMPLE' (basic questions). Reply ONLY with one keyword. Request: {user_input[:500]}"
+                resp = self.client.models.generate_content(
+                    model="gemini-3.1-flash-lite-preview",
+                    contents=route_prompt
+                )
+                resp_text = resp.text.upper()
+                
+                if "IMAGE_GEN" in resp_text:
+                    self.model = "gemini-3.1-flash-image-preview"
+                    yield f"__UI_STATUS__:🎨 [dim]Auto-routed to Image Model[/dim]"
+                elif "VIDEO_GEN" in resp_text:
+                    self.model = "veo-3.1-generate-preview"
+                    console.log("[info]Using model - veo-3.1-generate-preview.[/info]")
+                    yield f"__UI_STATUS__:🎬 Auto-routed to Video Generation model."
+                elif "COMPLEX" in resp_text:
+                    self.model = "gemini-3.1-pro-preview"
+                    console.log("[info]Using model - gemini-3.1-pro-preview.[/info]")
+                elif "MODERATE" in resp_text:
+                    self.model = "gemini-3-flash-preview"
+                    console.log("[info]Using model - gemini-3-flash-preview.[/info]")
+                else:
+                    self.model = "gemini-3.1-flash-lite-preview"
+                    console.log("[info]Using model - gemini-3.1-flash-lite-preview.[/info]")
+            except Exception as e:
+                yield f"__UI_STATUS__:⚠️ [dim]Fallback to {self.model}[/dim]"
+        
+        # console.log(f"Streaming from model: [italic]{self.model}[/italic]...")
         
         max_steps = 10
         step_count = 0
@@ -177,6 +337,10 @@ AVAILABLE TOOLS:
             while step_count < max_steps:
                 step_count += 1
                 full_content = ""
+                
+                # Manage history size before each model call
+                self._summarize_history()
+                
                 try:
                     if self.mode == "offline":
                         stream = ollama.chat(model=self.model, messages=self.messages, stream=True)
@@ -225,24 +389,56 @@ AVAILABLE TOOLS:
                                 has_yielded_token = True
                                 full_content += token
 
+                        # Detect JSON tool call marker (for offline mode or online models like Gemma that might output JSON)
                         if not is_tool_call:
-                            # Look for tool call marker (flexible match for JSON)
-                            if '"tool":' in full_content and '{' in full_content:
-                                start_idx = full_content.find('{')
-                                thought_open = full_content.rfind('<thought>')
-                                thought_close = full_content.rfind('</thought>')
-                                if thought_close > thought_open or thought_open == -1:
-                                    if '"tool":' in full_content[start_idx:]:
-                                        is_tool_call = True
-                                        if start_idx > yielded_len:
-                                            yield full_content[yielded_len:start_idx]
-                                            yielded_len = start_idx
-                        
+                            if '"tool"' in full_content and '{' in full_content:
+                                # Look for the first complete JSON object that looks like a tool call
+                                import re
+                                # Find all possible JSON-like blocks
+                                matches = list(re.finditer(r'\{[^{}]*"(tool|tool_name|function)"[^{}]*\}', full_content))
+                                if not matches:
+                                    # Fallback for nested objects (more expensive check)
+                                    matches = list(re.finditer(r'\{.*\}', full_content, re.DOTALL))
+                                
+                                if matches:
+                                    # We take the first match that looks valid
+                                    for match in matches:
+                                        potential_json = match.group(0)
+                                        try:
+                                            # Quick check if it's usable
+                                            test_data = json.loads(potential_json)
+                                            if any(k in test_data for k in ["tool", "tool_name", "function"]):
+                                                is_tool_call = True
+                                                start_idx = match.start()
+                                                if start_idx > yielded_len:
+                                                    yield full_content[yielded_len:start_idx]
+                                                    yielded_len = start_idx
+                                                break
+                                        except:
+                                            continue
+
+                        # Yield text chunks even if we are expecting a tool call (prevents preamble loss)
                         if not is_tool_call:
-                                chunk_to_yield = full_content[yielded_len:]
-                                if chunk_to_yield:
-                                    yield chunk_to_yield
+                            # Check if we are potentially starting a tool call
+                            # If we see '{"tool' or '{"function', we stop yielding and buffer to avoid printing raw JSON
+                            potential_start = full_content.find('{', yielded_len)
+                            if potential_start != -1:
+                                peek = full_content[potential_start:]
+                                if '"tool' in peek or '"function' in peek:
+                                    # We have a potential tool call starting. 
+                                    # Yield only what's before the '{'
+                                    if potential_start > yielded_len:
+                                        yield full_content[yielded_len:potential_start]
+                                        yielded_len = potential_start
+                                    # Stay silent for the rest (the JSON part)
+                                else:
+                                    # Not a tool call start yet, yield normally
+                                    yield full_content[yielded_len:]
                                     yielded_len = len(full_content)
+                            else:
+                                # No '{' found, yield normally
+                                yield full_content[yielded_len:]
+                                yielded_len = len(full_content)
                     
                     if not has_yielded_token and not is_tool_call:
                         yield f"__UI_STATUS__:🚨 No text output from {active_model}. This can happen if the prompt is blocked or the model is overloaded."
@@ -256,7 +452,15 @@ AVAILABLE TOOLS:
                     if "503" in err_str or "high demand" in err_str.lower():
                         yield "__UI_STATUS__:🚨 [bold yellow]Model Overloaded[/bold yellow]: The API is busy. Retrying automatically in next step or wait few seconds."
                     elif "429" in err_str:
-                         yield "__UI_STATUS__:🚨 [bold red]Quota Exceeded[/bold red]: Rate limit reached. Please wait or check your API quota."
+                         yield "__UI_STATUS__:🚨 [bold red]Quota Exceeded[/bold red]: Retrying with fallback model..."
+                         if self.fallback_models and active_model != self.fallback_models[0]:
+                             self.model = self.fallback_models[0]
+                             console.log(f"[info]Quota hit. Switched to fallback model: {self.model}[/info]")
+                             step_count -= 1 # Repeat the step with new model
+                             continue
+                         else:
+                             yield "__UI_STATUS__:🚨 [bold red]Quota Exceeded[/bold red]: All fallback models exhausted or rate limit too high."
+                             break
                     elif "blocked" in err_str.lower() or "safety" in err_str.lower():
                         yield "__UI_STATUS__:🛡️ [bold orange]Response Blocked[/bold orange]: The model's safety filters prevented this response."
                     elif "401" in err_str or "key" in err_str.lower():
@@ -272,12 +476,25 @@ AVAILABLE TOOLS:
                             tool_name = native_tool_call.function_call.name
                             tool_params = native_tool_call.function_call.args
                         else:
-                            # Parse JSON tool call for offline mode or fallback
-                            start = full_content.find('{')
-                            end = full_content.rfind('}') + 1
-                            tool_data = json.loads(full_content[start:end])
-                            tool_name = tool_data["tool"]
-                            tool_params = tool_data.get("parameters", {})
+                            # Use a more robust approach to find the JSON blob among full_content
+                            import re
+                            # Try to find the exact block we identified earlier
+                            match = re.search(r'\{[^{}]*"(tool|tool_name|function)"[^{}]*\}', full_content)
+                            if not match:
+                                match = re.search(r'\{.*\}', full_content, re.DOTALL)
+                            
+                            if match:
+                                json_str = match.group(0)
+                                tool_data = json.loads(json_str)
+                            else:
+                                raise ValueError("Could not extract valid JSON tool call from response.")
+                            
+                            # Be flexible with keys
+                            tool_name = tool_data.get("tool") or tool_data.get("tool_name") or tool_data.get("function")
+                            tool_params = tool_data.get("parameters") or tool_data.get("args") or tool_data.get("arguments") or {}
+                            
+                            if not tool_name:
+                                raise ValueError("No tool name found in JSON blob.")
                         
                         params_hint = json.dumps(tool_params)[:50] + "..." if len(json.dumps(tool_params)) > 50 else json.dumps(tool_params)
                         yield f"__UI_STATUS__:🛠️ Call [accent]{tool_name}[/accent] [dim]{params_hint}[/dim]"
@@ -310,17 +527,24 @@ AVAILABLE TOOLS:
 
                         # Update History
                         if native_tool_call:
+                            # Reconstruct the tool call part to ensure it's a clean data object
+                            # rather than a 'live' part from the stream
+                            clean_call_part = types.Part.from_function_call(
+                                name=native_tool_call.function_call.name,
+                                args=native_tool_call.function_call.args
+                            )
+                            
+                            # Get the FunctionCall ID if available
+                            func_id = getattr(native_tool_call.function_call, "id", None)
+                            if func_id:
+                                clean_call_part.function_call.id = func_id
+
                             self.messages.append({
                                 "role": "assistant", 
                                 "content": full_content, 
-                                "tool_call_part": native_tool_call
+                                "tool_call_part": clean_call_part
                             })
                             
-                            # Get the FunctionCall ID if available
-                            func_id = None
-                            if hasattr(native_tool_call.function_call, "id"):
-                                func_id = native_tool_call.function_call.id
-                                
                             self.messages.append({
                                 "role": "user", 
                                 "content": "", 
@@ -345,15 +569,15 @@ AVAILABLE TOOLS:
                         yield "__UI_STATUS__:🤔 Thought received. Prompting agent to execute plan..."
                         continue
                         
-                    lower_clean = clean_text.lower()
-                    if any(kw in lower_clean for kw in ["i will", "now i am going to", "let me", "i'll"]) and not is_tool_call:
-                         if not any(kw in lower_clean for kw in ["i have", "is done", "task completed"]):
-                            self.add_message("user", "You mentioned you would act. Please provide the tool call JSON now.")
-                            yield "__UI_STATUS__:⚠️ Intent detected but tool call missing. Nudging..."
-                            continue
-
-                    console.log("🏁 [info]Response generation complete.[/info]")
-                    break
+                    if clean_text:
+                        console.log("🏁 [info]Response generation complete.[/info]")
+                        break
+                    else:
+                        # If we have no clean text and no tool call, something is wrong
+                        if not is_tool_call:
+                            yield "__UI_STATUS__:🚨 Model returned an empty response. You might need to rephrase or check your quota."
+                            break
+                        continue # If is_tool_call was True but no text, we just continue normally
             
             if step_count >= max_steps:
                 yield "__UI_STATUS__:⚠️ Task stopped: Maximum allowed tool steps reached."

@@ -49,9 +49,19 @@ class TerminalManager:
         self.is_executing = True
         self.current_marker = f"____DONE_{int(time.time())}____"
         
+        import tempfile
+        script_path = os.path.join(tempfile.gettempdir(), f"agent_cmd_{id(self)}_{int(time.time())}.ps1")
+        try:
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write(cmd)
+        except Exception as e:
+            yield f"Error writing temp script: {e}\n"
+            self.is_executing = False
+            return
+            
         # We use a marker to know when the command is truly finished
-        # Note: We use Write-Host to avoid it being captured by some tools but seen by us
-        full_cmd = f"{cmd}\nWrite-Host '{self.current_marker}'\n"
+        # Sourcing the file ensures unclosed quotes don't break the parent parser context
+        full_cmd = f". '{script_path}'; Write-Host '{self.current_marker}'\n"
         
         try:
             self.process.stdin.write(full_cmd)
@@ -78,6 +88,13 @@ class TerminalManager:
                 continue
         
         self.is_executing = False
+        
+        # Cleanup temporary script file
+        try:
+            if os.path.exists(script_path):
+                os.remove(script_path)
+        except:
+            pass
 
     def interrupt(self):
         """Sends Ctrl+C to the PowerShell process group."""

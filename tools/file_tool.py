@@ -1,5 +1,6 @@
 import os
 from tools.registry import tool
+from tools.utils import validate_path
 
 @tool(
     name="read_file",
@@ -15,6 +16,7 @@ from tools.registry import tool
 )
 def read_file(path):
     try:
+        path = validate_path(path)
         if not os.path.exists(path):
             return f"Error: File '{path}' does not exist."
         with open(path, 'r') as f:
@@ -37,6 +39,7 @@ def read_file(path):
 )
 def write_file(path, content):
     try:
+        path = validate_path(path)
         with open(path, 'w') as f:
             f.write(content)
         return f"Successfully wrote to file '{path}'."
@@ -57,6 +60,7 @@ def write_file(path, content):
 )
 def list_directory(path):
     try:
+        path = validate_path(path)
         return str(os.listdir(path))
     except Exception as e:
         return f"Error listing directory: {str(e)}"
@@ -76,6 +80,7 @@ def list_directory(path):
 def create_directory(path):
     """Creates a new directory."""
     try:
+        path = validate_path(path)
         os.makedirs(path, exist_ok=True)
         return f"Directory '{path}' created successfully."
     except Exception as e:
@@ -96,6 +101,7 @@ def create_directory(path):
 def delete_file(path):
     """Deletes a file."""
     try:
+        path = validate_path(path)
         os.remove(path)
         return f"File '{path}' deleted successfully."
     except Exception as e:
@@ -117,6 +123,7 @@ def delete_file(path):
 )
 def edit_file(path, content):
     try:
+        path = validate_path(path)
         with open(path, 'w') as f:
             f.write(content)
         return f"Successfully edited file '{path}'."

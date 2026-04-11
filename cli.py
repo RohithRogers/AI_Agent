@@ -13,7 +13,9 @@ from tools import (
     python_repl_tool, 
     git_tool, 
     doc_tool, 
-    browser_tool
+    browser_tool,
+    ppt_tool,
+    code_tool
 )
 from CLI.commands import main
 

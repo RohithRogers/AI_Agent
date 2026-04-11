@@ -1,6 +1,7 @@
 from tools.registry import tool
 from tools.terminal_manager import terminal_manager
 import os
+from tools.utils import validate_path
 
 @tool(
     name="program_run",
@@ -16,20 +17,24 @@ import os
     requires_permission=True
 )
 def program_run(path, language):
-    if not os.path.exists(path):
-        return f"Error: File '{path}' not found."
-    
-    if language == "python":
-        cmd = f"python {path}"
-    elif language == "c":
-        cmd = f"gcc {path} -o temp_app.exe; if ($?) {{ ./temp_app.exe }}"
-    elif language == "cpp":
-        cmd = f"g++ {path} -o temp_app.exe; if ($?) {{ ./temp_app.exe }}"
-    else:
-        return f"Error: Language '{language}' is not supported."
-    
-    # Yield each line of output as it arrives
-    yield from terminal_manager.execute_stream(cmd)
+    try:
+        path = validate_path(path)
+        if not os.path.exists(path):
+            return f"Error: File '{path}' not found."
+        
+        if language == "python":
+            cmd = f"python {path}"
+        elif language == "c":
+            cmd = f"gcc {path} -o temp_app.exe; if ($?) {{ ./temp_app.exe }}"
+        elif language == "cpp":
+            cmd = f"g++ {path} -o temp_app.exe; if ($?) {{ ./temp_app.exe }}"
+        else:
+            return f"Error: Language '{language}' is not supported."
+        
+        # Yield each line of output as it arrives
+        yield from terminal_manager.execute_stream(cmd)
+    except Exception as e:
+        yield f"Execution error: {e}"
 
 
 @tool(
