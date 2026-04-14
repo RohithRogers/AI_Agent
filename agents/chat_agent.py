@@ -334,7 +334,15 @@ AVAILABLE TOOLS:
         
         full_content = ""
         try:
-            while step_count < max_steps:
+            while True:
+                if step_count >= max_steps:
+                    approved = (yield f"__MAX_STEPS_REACHED__:{max_steps}")
+                    if approved:
+                        max_steps += 10
+                    else:
+                        yield "__UI_STATUS__:⚠️ Task stopped: Maximum allowed tool steps reached."
+                        break
+
                 step_count += 1
                 full_content = ""
                 
@@ -385,6 +393,11 @@ AVAILABLE TOOLS:
                                     if part.function_call:
                                         is_tool_call = True
                                         native_tool_call = part # Store the entire Part object!
+                            
+                            # For some models, they might repeat their previous thought if history is long.
+                            # We check if the token starts with something we already yielded in this turn.
+                            # (Though usually full_content is new each step, so repetition is between steps)
+                            
                             if token:
                                 has_yielded_token = True
                                 full_content += token
@@ -419,20 +432,27 @@ AVAILABLE TOOLS:
 
                         # Yield text chunks even if we are expecting a tool call (prevents preamble loss)
                         if not is_tool_call:
-                            # Check if we are potentially starting a tool call
-                            # If we see '{"tool' or '{"function', we stop yielding and buffer to avoid printing raw JSON
+                            # PROACTIVE TOOL DETECTION: 
+                            # If we see a '{', it MIGHT be a tool call. Buffer it.
                             potential_start = full_content.find('{', yielded_len)
                             if potential_start != -1:
+                                # We stay silent from the first '{' onwards if it looks like a tool call
+                                # or until we are sure it's NOT a tool call.
                                 peek = full_content[potential_start:]
-                                if '"tool' in peek or '"function' in peek:
-                                    # We have a potential tool call starting. 
-                                    # Yield only what's before the '{'
+                                # If it's short, we wait for more context before yielding '{'
+                                if len(peek) < 15:
+                                    continue # Don't yield yet
+                                
+                                if '"tool' in peek or '"function' in peek or '"tool_name' in peek:
+                                    # It's definitely a tool call starting
                                     if potential_start > yielded_len:
-                                        yield full_content[yielded_len:potential_start]
-                                        yielded_len = potential_start
-                                    # Stay silent for the rest (the JSON part)
+                                        text_to_yield = full_content[yielded_len:potential_start]
+                                        if text_to_yield:
+                                            yield text_to_yield
+                                            yielded_len = potential_start
+                                    # Stay silent for the JSON part
                                 else:
-                                    # Not a tool call start yet, yield normally
+                                    # Not a tool call, yield the buffered '{' and everything after
                                     yield full_content[yielded_len:]
                                     yielded_len = len(full_content)
                             else:
@@ -498,6 +518,7 @@ AVAILABLE TOOLS:
                         
                         params_hint = json.dumps(tool_params)[:50] + "..." if len(json.dumps(tool_params)) > 50 else json.dumps(tool_params)
                         yield f"__UI_STATUS__:🛠️ Call [accent]{tool_name}[/accent] [dim]{params_hint}[/dim]"
+                        yield f"__TOOL_CALL__:{tool_name}:{json.dumps(tool_params)}"
                         
                         tool_info = registry.tools.get(tool_name)
                         if tool_info and tool_info.get("requires_permission"):
@@ -578,9 +599,6 @@ AVAILABLE TOOLS:
                             yield "__UI_STATUS__:🚨 Model returned an empty response. You might need to rephrase or check your quota."
                             break
                         continue # If is_tool_call was True but no text, we just continue normally
-            
-            if step_count >= max_steps:
-                yield "__UI_STATUS__:⚠️ Task stopped: Maximum allowed tool steps reached."
         except KeyboardInterrupt:
             console.log("\n[error]⚠️ Generation interrupted.[/error]")
             self.add_message("assistant", full_content + "... [Interrupted]")

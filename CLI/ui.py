@@ -81,8 +81,9 @@ def show_welcome_panel(agent, current_mode):
     
     description = Text.assemble(
         (f"\nFree Code can write, test and debug code right from your terminal.\n", "white"),
-        (f"Describe a task to get started or enter ", "white"),
-        (f"?", theme["accent"]), (f" for help. AI, check for mistakes.\n", "white")
+        (f"Describe a task or use ", "white"),
+        (f"\"\"\"...", theme["accent"]), (f" for multi-line prompts. Enter ", "white"),
+        (f"?", theme["accent"]), (f" for help.\n", "white")
     )
     
     status_lines = Group(

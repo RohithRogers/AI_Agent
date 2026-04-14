@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 import time as t
 from rich.console import Group
 from rich.live import Live
@@ -20,6 +21,7 @@ def start_chat(mode="offline"):
     
     current_mode = "chat"
     agent = ChatAgent(system_prompt=CHAT_MODE_PROMPT, mode=mode)
+    multiline_mode = False
     
     show_welcome_panel(agent, current_mode)
     
@@ -37,9 +39,25 @@ def start_chat(mode="offline"):
                 
             # Boxed input simulation
             console.print(f"[dim]╭[/dim]{'─' * (console.width - 2)}[dim]╮[/dim]")
-            user_input = console.input(f"[dim]│[/dim] [{theme['user']}]❯ [/{theme['user']}]").strip()
+            if multiline_mode:
+                console.print(f"[dim]│[/dim] [{theme['error']}]MULTI-LINE MODE[/{theme['error']}] (Ctrl+Z + Enter to submit)")
+                user_input = sys.stdin.read().strip()
+            else:
+                user_input = console.input(f"[dim]│[/dim] [{theme['user']}]❯ [/{theme['user']}]").strip()
             console.print(f"[dim]╰[/dim]{'─' * (console.width - 2)}[dim]╯[/dim]")
             
+            # Triple quote detection for quick multi-line paste
+            if user_input.startswith('"""') and not user_input.endswith('"""', 3):
+                console.print(f"[{theme['info']}]Triple-quote detected. Entering multi-line mode. End with '\"\"\"' to submit.[/{theme['info']}]")
+                lines = [user_input[3:]]
+                while True:
+                    line = input("... ")
+                    if '"""' in line:
+                        lines.append(line.replace('"""', ''))
+                        break
+                    lines.append(line)
+                user_input = "\n".join(lines).strip()
+
             if not user_input:
                 continue
 
@@ -141,6 +159,8 @@ def start_chat(mode="offline"):
                         f"  /mcp <n> <c>    - Connect an MCP Tool Server\n"
                         f"  /save           - Save current conversation to JSON\n"
                         f"  /clear          - Clear conversation history\n"
+                        f"  /paste          - Multi-line paste mode (Ctrl+Z to finish)\n"
+                        f"  /multiline      - Toggle permanent multi-line input mode\n"
                         f"  /help           - Show this command list\n"
                         "  /exit           - Close the application\n"
                         "  /theme <name>   - Switch UI theme (green/blue)"
@@ -204,6 +224,17 @@ def start_chat(mode="offline"):
                         json.dump(save_history, f, indent=2)
                     console.print(f"[{get_theme()['success']}]Conversation saved to {filename} (system prompts excluded)[/{get_theme()['success']}]")
                     continue
+                elif cmd == "/paste":
+                    console.print(f"[{theme['info']}]Paste your multi-line prompt below. Press Ctrl+Z (Windows) then Enter to finish:[/{theme['info']}]")
+                    content = sys.stdin.read()
+                    user_input = content.strip()
+                    if not user_input:
+                        continue
+                elif cmd == "/multiline":
+                    multiline_mode = not multiline_mode
+                    state = "ENABLED" if multiline_mode else "DISABLED"
+                    console.print(f"[{theme['success']}]Multi-line mode {state}[/{theme['success']}]")
+                    continue
                 elif cmd == "/list_models":
                     console.log(f"[{get_theme()['accent']}]Local Models:[/{get_theme()['accent']}]")
                     for model in agent.get_available_models():
@@ -266,6 +297,20 @@ def start_chat(mode="offline"):
                                 
                                 live.start()
                                 chunk = gen.send(approved)
+                            elif isinstance(chunk, str) and chunk.startswith("__MAX_STEPS_REACHED__"):
+                                parts = chunk.split(":", 1)
+                                steps = parts[1]
+                                
+                                live.stop()
+                                console.print(f"\n[{get_theme()['warning']}]⚠️ Maximum tool steps ({steps}) reached.[/{theme['warning']}]")
+                                choice = console.input(f"[{get_theme()['success']}]Increase limit by 10 and continue? (Y/n): [/{get_theme()['success']}]").strip().lower()
+                                approved = choice in ["", "y", "yes"]
+                                
+                                if approved:
+                                    live.start()
+                                    chunk = gen.send(True)
+                                else:
+                                    chunk = gen.send(False)
                             elif isinstance(chunk, str) and chunk.startswith("__UI_STATUS__"):
                                 status_raw = chunk.replace("__UI_STATUS__:", "")
                                 if status_raw.startswith("EXEC_CMD:"):
@@ -295,7 +340,15 @@ def start_chat(mode="offline"):
                                 if chunk is not None:
                                     if current_status:
                                         current_status = "" 
-                                    full_response += chunk
+                                    
+                                    # Simple deduplication: if the chunk repeats what's at the end of full_response
+                                    # This can happen if the model repeats its preamble in subsequent tool-call steps.
+                                    # We use a 10 char threshold to avoid matching single letters or punctuation.
+                                    strip_chunk = chunk.strip()
+                                    if strip_chunk and full_response.strip().endswith(strip_chunk) and len(strip_chunk) > 10:
+                                        pass # Skip duplicate preamble
+                                    else:
+                                        full_response += chunk
                                     
                                     live.update(Group(
                                         prefix_text,
