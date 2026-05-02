@@ -133,6 +133,9 @@ def start_chat(mode="offline"):
                             break
                     if not user_input:
                         continue
+                    # If voice returned a command, re-enter the loop so it gets handled properly
+                    if user_input.startswith("/"):
+                        continue
                 elif cmd == "/exit":
                     console.print(f"[{get_theme()['warning']}]Exiting...[/{get_theme()['warning']}]")
                     t.sleep(1)
@@ -233,7 +236,8 @@ def start_chat(mode="offline"):
                     console.print(f"[{get_theme()['error']}]Mode switched to AGENT (Tools Enabled)[/{get_theme()['error']}]")
                     continue
                 elif cmd == "/clear":
-                    agent.messages = [{"role": "system", "content": agent.base_system_prompt + agent.tools_prompt}]
+                    agent.context.store.clear()
+                    agent.context.update_system_prompt(agent.base_system_prompt + (agent.tools_prompt if agent.tools_enabled else ""))
                     console.print(f"[{get_theme()['warning']}]Conversation history cleared.[/{get_theme()['warning']}]")
                     continue
                 elif cmd.startswith("/mcp"):
@@ -265,8 +269,12 @@ def start_chat(mode="offline"):
                     import json
                     filename = f"chat_save_{int(t.time())}.json"
                     with open(filename, "w") as f:
-                        # Filter out system messages as requested
-                        save_history = [m for m in agent.messages if m["role"] != "system"]
+                        # Filter out system messages and internal tier metadata
+                        save_history = [
+                            {k: v for k, v in m.items() if k != "tier"}
+                            for m in agent.context.store.get_all()
+                            if m["role"] != "system"
+                        ]
                         json.dump(save_history, f, indent=2)
                     console.print(f"[{get_theme()['success']}]Conversation saved to {filename} (system prompts excluded)[/{get_theme()['success']}]")
                     continue
@@ -318,13 +326,35 @@ def start_chat(mode="offline"):
             
             if hasattr(agent, 'manual_mode') and agent.manual_mode:
                 model_display = "Manual"
-            prefix_text = f"[{theme['agent']}]{model_display}[{agent.mode}] ❯ [/{theme['agent']}]"
+            
+            # --- Print the prefix ONCE as static text (fixes the repeated prefix bug) ---
+            prefix_text = f"[{theme['agent']}]{model_display}[{agent.mode}] ❯[/{theme['agent']}]"
+            console.print(prefix_text)
+            
             full_response = ""
             current_status = ""
             terminal_command = ""
             terminal_output = ""
+            tool_steps = []  # Sequential list of tool calls/results to display
             
-            with Live("", console=console, refresh_per_second=10) as live:
+            def _build_live_group():
+                """Builds the renderable group for the live display."""
+                items = []
+                # Show sequential tool steps
+                for step in tool_steps:
+                    items.append(Text.from_markup(step))
+                # Show current running status
+                if current_status:
+                    items.append(Text.from_markup(f" [italic yellow]⚡ {current_status}[/italic yellow]"))
+                # Show terminal output if active
+                if terminal_command:
+                    items.append(render_terminal_box(terminal_command, terminal_output))
+                # Show streaming response text
+                if full_response:
+                    items.append(format_response(full_response, theme))
+                return Group(*items) if items else Text("")
+            
+            with Live("", console=console, refresh_per_second=15, vertical_overflow="visible") as live:
                 try:
                     gen = agent.run(user_input, attachments=attachments.copy())
                     attachments.clear()
@@ -350,7 +380,7 @@ def start_chat(mode="offline"):
                                 steps = parts[1]
                                 
                                 live.stop()
-                                console.print(f"\n[{get_theme()['warning']}]⚠️ Maximum tool steps ({steps}) reached.[/{theme['warning']}]")
+                                console.print(f"\n[{get_theme()['warning']}]⚠️ Maximum tool steps ({steps}) reached.[/{get_theme()['warning']}]")
                                 choice = console.input(f"[{get_theme()['success']}]Increase limit by 10 and continue? (Y/n): [/{get_theme()['success']}]").strip().lower()
                                 approved = choice in ["", "y", "yes"]
                                 
@@ -360,63 +390,72 @@ def start_chat(mode="offline"):
                                 else:
                                     chunk = gen.send(False)
                             elif isinstance(chunk, str) and chunk.startswith("__TOOL_CALL__"):
+                                # Skip, we accumulate in __UI_STATUS__
+                                chunk = next(gen)
+                            elif isinstance(chunk, str) and chunk.startswith("__TOOL_RESULT__"):
+                                parts = chunk.split(":", 2)
+                                tool_name = parts[1]
+                                tool_result = parts[2]
+                                
+                                # Truncate for display
+                                display_result = tool_result
+                                if len(display_result) > 300:
+                                    display_result = display_result[:300] + "... [dim][truncated][/dim]"
+                                
+                                # Replace the last "running..." step entry with a "done" entry
+                                first_line = display_result.splitlines()[0][:80] if display_result.strip() else "(no output)"
+                                done_step = f"  [dim]└─[/dim] [bold cyan]{tool_name}[/bold cyan] [dim]{first_line}[/dim]"
+                                if tool_steps:
+                                    tool_steps[-1] = done_step
+                                else:
+                                    tool_steps.append(done_step)
+                                
+                                live.update(_build_live_group())
                                 chunk = next(gen)
                             elif isinstance(chunk, str) and chunk.startswith("__UI_STATUS__"):
                                 status_raw = chunk.replace("__UI_STATUS__:", "")
                                 if status_raw.startswith("EXEC_CMD:"):
                                     terminal_command = status_raw.replace("EXEC_CMD:", "")
                                     terminal_output = ""
-                                    current_status = "" # Hide standard status when terminal is active
+                                    current_status = ""
+                                elif "Call " in status_raw and "[accent]" in status_raw:
+                                    # This is a tool-call status — add as a new sequential step
+                                    clean = apply_theme_placeholders(status_raw)
+                                    tool_steps.append(f"  [dim]├─[/dim] {clean} [italic yellow]...[/italic yellow]")
+                                    current_status = ""
+                                    terminal_command = ""
                                 else:
                                     current_status = apply_theme_placeholders(status_raw)
-                                    terminal_command = "" # Hide terminal if we switch back to normal status
+                                    terminal_command = ""
                                 
-                                live.update(Group(
-                                    prefix_text,
-                                    format_response(full_response, theme),
-                                    render_terminal_box(terminal_command, terminal_output) if terminal_command else Text(""),
-                                    f"\n [italic yellow]⚡ {current_status}[/italic yellow]" if current_status else Text("")
-                                ))
+                                live.update(_build_live_group())
                                 chunk = next(gen)
                             elif isinstance(chunk, str) and chunk.startswith("__TOOL_STREAM__"):
                                 terminal_output += chunk.replace("__TOOL_STREAM__:", "")
-                                live.update(Group(
-                                    prefix_text,
-                                    format_response(full_response, theme),
-                                    render_terminal_box(terminal_command, terminal_output),
-                                ))
+                                live.update(_build_live_group())
                                 chunk = next(gen)
                             else:
                                 if chunk is not None:
                                     if current_status:
-                                        current_status = "" 
+                                        current_status = ""
                                     
-                                    # Simple deduplication: if the chunk repeats what's at the end of full_response
-                                    # This can happen if the model repeats its preamble in subsequent tool-call steps.
-                                    # We use a 10 char threshold to avoid matching single letters or punctuation.
                                     strip_chunk = chunk.strip()
                                     if strip_chunk and full_response.strip().endswith(strip_chunk) and len(strip_chunk) > 10:
-                                        pass # Skip duplicate preamble
+                                        pass  # Skip duplicate preamble
                                     else:
                                         full_response += chunk
                                     
-                                    live.update(Group(
-                                        prefix_text,
-                                        format_response(full_response, theme),
-                                        render_terminal_box(terminal_command, terminal_output) if terminal_command else Text("")
-                                    ))
+                                    live.update(_build_live_group())
                                 chunk = next(gen)
                     except StopIteration:
-                        # Final update - ensure status is preserved if response is empty
-                        if not full_response and current_status:
-                             live.update(Group(
-                                prefix_text,
-                                f"\n [italic yellow]⚡ {current_status}[/italic yellow]"
-                            ))
-                        else:
+                        # Final paint — only show the response text, tool steps already visible above
+                        if full_response:
                             live.update(format_response(full_response, theme))
+                        elif current_status:
+                            live.update(Text.from_markup(f" [italic yellow]⚡ {current_status}[/italic yellow]"))
+                        else:
+                            live.update(Text(""))
                 except KeyboardInterrupt:
-                    # Check if a command was running
                     if terminal_command:
                         live.stop()
                         console.print(f"\n[{theme['warning']}]⚠️ Command is still running.[/{theme['warning']}]")
@@ -431,8 +470,6 @@ def start_chat(mode="offline"):
                             break
                         else:
                             live.start()
-                            # How to resume? We'd need to re-enter the loop. 
-                            # For now, we'll just stop the current turn gracefully.
                             break
                     else:
                         live.update(format_response(full_response + " [dim](stopped)[/dim]", theme))
@@ -441,3 +478,5 @@ def start_chat(mode="offline"):
         except KeyboardInterrupt:
             console.print("\n[bold yellow]Exiting...[/bold yellow]")
             break
+
+

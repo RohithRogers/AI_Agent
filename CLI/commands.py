@@ -79,6 +79,20 @@ def main():
                                 render_terminal_box(terminal_command, terminal_output),
                             ))
                             chunk = next(gen)
+                        elif isinstance(chunk, str) and chunk.startswith("__TOOL_CALL__"):
+                            # Consume silently — __UI_STATUS__ already shows the tool name
+                            chunk = next(gen)
+                        elif isinstance(chunk, str) and chunk.startswith("__TOOL_RESULT__"):
+                            parts = chunk.split(":", 2)
+                            tool_name = parts[1]
+                            tool_result = parts[2]
+                            full_response += f"\n\n🛠️ **Tool [{tool_name}] Result:**\n{tool_result}\n"
+                            live.update(Group(
+                                prefix_text,
+                                format_response(full_response, theme),
+                                render_terminal_box(terminal_command, terminal_output) if terminal_command else Text(""),
+                            ))
+                            chunk = next(gen)
                         else:
                             if chunk is not None:
                                 if current_status:

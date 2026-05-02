@@ -345,6 +345,15 @@ async def main(page: ft.Page):
                     tool_name = parts[1]
                     params = json.loads(parts[2])
                     await _show_tool_call(tool_name, params)
+                
+                # tool result
+                elif isinstance(chunk, str) and chunk.startswith("__TOOL_RESULT__"):
+                    parts = chunk.split(":", 2)
+                    tool_name = parts[1]
+                    tool_result = parts[2]
+                    # We can optionally show this as a separate bubble or append to current
+                    full_response += f"\n\n🛠️ **Tool [{tool_name}] Result:**\n{tool_result}\n"
+                    await _update_agent_bubble(full_response)
 
                 # terminal stream
                 elif isinstance(chunk, str) and chunk.startswith("__TOOL_STREAM__"):

@@ -22,41 +22,45 @@ console = Console()
 
 class ChatAgent(BaseAgent):
     def __init__(self, model="deepseek-coder", system_prompt="", mode="offline", tools_enabled=True):
-        # Store original prompts for mode switching
+        # 1. Basic configuration
         self.mode = mode
         self.tools_enabled = tools_enabled
         self.base_system_prompt = system_prompt
-        self.available_models = ["deepseek-coder","functiongemma"]
+        self.available_models = ["deepseek-coder", "functiongemma"]
+        self.model = model # Initialize model here so super().__init__ has it
         
-        # Initialize MCP if configured in .env or config (TBD)
-        self._update_tools_prompt()
+        # 2. History management settings (needed for ContextManager)
+        self.max_history_chars = 60_000
+        self.emergency_history_chars = 20_000
+        self.max_tool_output_chars = 3_000
+        self.retain_messages = 6
         
-        super().__init__(model, self.base_system_prompt + (self.tools_prompt if self.tools_enabled else ""))
-        
-        self.online_models = []
-        self.fallback_models = []
-        
-        # History management settings
-        self.max_history_chars = 60_000   # ~15k tokens; triggers pruning
-        self.emergency_history_chars = 20_000  # aggressive prune threshold for fallbacks
-        self.max_tool_output_chars = 3_000  # max chars saved per tool response
-        self.retain_messages = 6  # min recent messages always kept
-        
-        # Initialize GenAI client if in online mode
-        if self.mode != "offline":
-            from config import ONLINE_MODE_GEMINI,ONLINE_MODE_GROQ
-            self.client = genai.Client(api_key=ONLINE_MODE_GEMINI)
-            self.groq_client = Groq(api_key=ONLINE_MODE_GROQ)
-            self._fetch_online_models()
-            # Ensure model is a valid model if none provided
-            if not any(x in self.model.lower() for x in ["gemini", "gemma", "llama", "mixtral", "groq"]):
-                self.model = self.online_models[0] if self.online_models else "gemini-2.0-flash"
-        # Initialize new Context Manager
+        # 3. Initialize Context Manager (must be before _update_tools_prompt)
         self.context = ContextManager(
             token_budget=self.max_history_chars,
             summary_threshold=int(self.max_history_chars * 0.8)
         )
-        self.context.update_system_prompt(self.base_system_prompt + (self.tools_prompt if self.tools_enabled else ""))
+        
+        # 4. Initialize Tools and Prompts
+        self.tools_prompt = ""
+        self._update_tools_prompt()
+        
+        # 5. Initialize BaseAgent
+        super().__init__(self.model, self.base_system_prompt + (self.tools_prompt if self.tools_enabled else ""))
+        
+        # 6. Online Mode Setup
+        self.online_models = []
+        self.fallback_models = []
+        if self.mode != "offline":
+            from config import ONLINE_MODE_GEMINI, ONLINE_MODE_GROQ
+            self.client = genai.Client(api_key=ONLINE_MODE_GEMINI)
+            self.groq_client = Groq(api_key=ONLINE_MODE_GROQ)
+            self._fetch_online_models()
+            if not any(x in self.model.lower() for x in ["gemini", "gemma", "llama", "mixtral", "groq"]):
+                self.model = self.online_models[0] if self.online_models else "gemini-2.0-flash"
+                # If model changed, we might need a prompt refresh (though schema doesn't change based on model yet)
+                self._update_tools_prompt()
+
 
     def _fetch_online_models(self):
         """Fetches available models from Gemini and Groq APIs."""
@@ -104,10 +108,13 @@ class ChatAgent(BaseAgent):
         """Refreshes the tools JSON schema in the system prompt."""
         if not self.tools_enabled:
             self.tools_prompt = ""
-            return
-
-        tool_schemas = registry.get_tool_schemas()
-        self.tools_prompt = f"""
+        else:
+            tool_schemas = registry.get_tool_schemas()
+            # Enhance skills awareness
+            skills_list = skill_registry_inst.list_skills()
+            skills_formatted = "\n".join([f"- {name}: {desc}" for name, desc in skills_list.items()])
+            
+            self.tools_prompt = f"""
 You are an advanced AI agent with access to a REAL persistent PowerShell session.
 Your actions persist (e.g., changing directories, installing packages).
 
@@ -120,10 +127,12 @@ TASK EXECUTION FLOW:
 SKILLS:
 Skills are task-specific knowledge modules that you can call to get information to perform tasks. 
 They provide you with exact process flow to finish a task. You can call them using the 'get_skill_content' tool.
-Like how to create advanced level documents, pdfs, spreadsheets, presentations, how to use APIs, how to do complex coding tasks, etc.
-Skills are optional but use them if the user wants the best results. If a relevant skill exists, it is recommended to call it as it can provide you with the exact steps to finish a task.
-Example: {{"tool": "get_skill_content", "parameters": {{"skill_name": "pdf_skill.md"}}}}
-{json.dumps(skill_registry_inst.list_skills(), indent=2)}
+If a relevant skill exists, you MUST call it FIRST before attempting the task, as it contains specialized instructions and code patterns.
+
+Available Skills:
+{skills_formatted}
+
+Example of using a skill: {{"tool": "get_skill_content", "parameters": {{"skill_name": "pdf_skill.md"}}}}
 
 IMPORTANT RULES:
 - If you say you will do something, you MUST execute the tool in the same response.
@@ -140,6 +149,7 @@ AVAILABLE TOOLS:
         
         # Update context
         self.context.update_system_prompt(self.base_system_prompt + self.tools_prompt)
+
 
     def _get_gemini_tools(self):
         """Converts registry tools to Gemini genai.types.Tool format."""
@@ -413,12 +423,13 @@ AVAILABLE TOOLS:
                 current_context = self.context.get_context()
                 
                 try:
+                    # active_model must be set for all branches (used in error handlers below)
+                    active_model = self.model
                     if self.mode == "offline":
                         stream = ollama.chat(model=self.model, messages=current_context, stream=True)
                     elif self.groq_client and any(x in self.model.lower() for x in ["llama", "mixtral", "groq", "gemma"]):
                         # Groq execution logic
                         groq_msgs = self._get_groq_messages(current_context)
-                        active_model = self.model
                         stream = self.groq_client.chat.completions.create(
                             model=active_model,
                             messages=groq_msgs,
@@ -429,7 +440,6 @@ AVAILABLE TOOLS:
                         # Gemini execution logic
                         gemini_msgs = self._get_gemini_messages(current_context)
                         system_instr = next((m["content"] for m in current_context if m["role"] == "system"), "")
-                        active_model = self.model
                         
                         stream = self.client.models.generate_content_stream(
                             model=active_model, 
@@ -444,6 +454,7 @@ AVAILABLE TOOLS:
                     native_tool_call = None
                     yielded_len = 0
                     has_yielded_token = False
+                    self._groq_tc_buffer = ""  # Reset Groq tool-call argument buffer each step
                     
                     for chunk in stream:
                         if self.mode == "offline":
@@ -451,7 +462,7 @@ AVAILABLE TOOLS:
                             if token:
                                 has_yielded_token = True
                                 full_content += token
-                        elif self.groq_client and any(x in self.model.lower() for x in ["llama", "mixtral", "groq"]):
+                        elif self.groq_client and any(x in self.model.lower() for x in ["llama", "mixtral", "groq", "gemma"]):
                             # Groq Stream Handling
                             if chunk.choices:
                                 delta = chunk.choices[0].delta
@@ -486,7 +497,8 @@ AVAILABLE TOOLS:
                                 candidate = chunk.candidates[0]
                                 
                                 # Check for safety blocks/interruption
-                                if candidate.finish_reason and candidate.finish_reason not in [types.FinishReason.STOP, types.FinishReason.MAX_TOKENS]:
+                                _unspecified = getattr(types.FinishReason, "FINISH_REASON_UNSPECIFIED", None) or getattr(types.FinishReason, "UNSPECIFIED", None)
+                                if candidate.finish_reason and candidate.finish_reason not in [types.FinishReason.STOP, types.FinishReason.MAX_TOKENS, _unspecified]:
                                     yield f"__UI_STATUS__:🚨 [bold orange]Stream Interrupted[/bold orange]: {candidate.finish_reason}"
                                 
                                 for part in candidate.content.parts:
@@ -584,12 +596,11 @@ AVAILABLE TOOLS:
                              break
                              
                          yield "__UI_STATUS__:🚨 [bold red]API Error/Quota[/bold red]: Retrying with next fallback model..."
-                         
-                         # Memory relief: aggressively prune context before retrying
-                         system_msg = self.messages[0]
-                         self.messages = [system_msg] + self.messages[-4:]
-                         self._prune_tool_responses()
-                         console.log(f"[info]Context pruned for fallback. Size: {self._get_context_chars()} chars.[/info]")
+                          
+                         # Memory relief: ContextManager automatically trims the payload based on the budget.
+                         # We can temporarily lower the budget if we really want to be aggressive.
+                         current_context = self.context.get_context()
+                         console.log(f"[info]Context handled by manager. Payload size: {sum(len(str(m.get('content',''))) for m in current_context)} chars.[/info]")
                          
                          current_idx = -1
                          if self.fallback_models and active_model in self.fallback_models:
@@ -680,6 +691,9 @@ AVAILABLE TOOLS:
 
                         # Truncate large tool outputs before storing in history
                         stored_result = self.context.truncate_content(result, max_chars=self.max_tool_output_chars)
+                        
+                        # Yield the result to the UI!
+                        yield f"__TOOL_RESULT__:{tool_name}:{stored_result}"
 
                         # Update Context
                         if native_tool_call:
@@ -689,7 +703,7 @@ AVAILABLE TOOLS:
                             self.context.add_message("user", "", tool_response={"id": func_id, "name": tool_name, "content": stored_result})
                         else:
                             self.context.add_message("assistant", full_content)
-                            self.context.add_message("user", f"Tool '{tool_name}' returned: {stored_result}")
+                            self.context.add_message("user", f"Tool '{tool_name}' returned: {stored_result}", tool_response={"name": tool_name, "content": stored_result})
                         
                         continue
                     except Exception as e:
@@ -717,4 +731,4 @@ AVAILABLE TOOLS:
                         continue # If is_tool_call was True but no text, we just continue normally
         except KeyboardInterrupt:
             console.log("\n[error]⚠️ Generation interrupted.[/error]")
-            self.add_message("assistant", full_content + "... [Interrupted]")
+            self.context.add_message("assistant", full_content + "... [Interrupted]")

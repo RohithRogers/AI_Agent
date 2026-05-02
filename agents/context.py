@@ -52,13 +52,17 @@ class ContextManager:
         # If no system prompt exists, add one at the start
         self.store.store_at_front({"role": "system", "content": content}, MessageTier.HIGH)
 
-    def classify_message(self, role: str, content: str) -> MessageTier:
+    def classify_message(self, role: str, content: str, msg_obj: Optional[Dict[str, Any]] = None) -> MessageTier:
         """
         Classifier: HIGH / MEDIUM / LOW
         - LOW -> discard
         - HIGH/MEDIUM -> store
         """
         if role == "system":
+            return MessageTier.HIGH
+            
+        # Always keep tool calls and responses, even if empty text
+        if msg_obj and ("tool_call_part" in msg_obj or "tool_response" in msg_obj or "tool_call" in msg_obj):
             return MessageTier.HIGH
         
         # Heuristics for classification
@@ -98,14 +102,15 @@ class ContextManager:
         Entry point for new messages.
         Applies Classifier logic and stores if not LOW.
         """
-        tier = self.classify_message(role, content)
+        message = {"role": role, "content": content}
+        message.update(kwargs)
+        
+        tier = self.classify_message(role, content, message)
         
         if tier == MessageTier.LOW:
             # LOW -> discard
             return
             
-        message = {"role": role, "content": content}
-        message.update(kwargs)
         self.store.store(message, tier)
 
     def assemble_payload(self) -> List[Dict[str, Any]]:
