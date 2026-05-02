@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tools import (
     time_tool, file_tool, program_run_tool,
     python_repl_tool, git_tool, doc_tool,
-    browser_tool, ppt_tool, code_tool,
+    browser_tool, ppt_tool, code_tool, skill_tool,
 )
 
 import flet as ft
@@ -43,12 +43,12 @@ SIDEBAR_W   = 245
 TERMINAL_H  = 220
 
 CHAT_MODE_PROMPT = (
-    "You are a helpful AI assistant with access to local tools. "
-    "Use markdown for code and lists."
+    "You are a helpful AI assistant. You are in CHAT mode and do NOT have access to tools. "
+    "Focus on conversation and answering questions."
 )
 RUN_MODE_PROMPT = (
-    "You are a technical assistant. If code is requested, return ONLY "
-    "raw executable code without markdown, comments, or explanations."
+    "You are a powerful AI Agent with full access to system tools. "
+    "Use them to help the user complete their tasks."
 )
 
 # ─────────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ async def main(page: ft.Page):
     page.fonts         = {}
 
     # ── Agent ─────────────────────────────────────────────
-    agent = ChatAgent(system_prompt=CHAT_MODE_PROMPT, mode="offline")
+    agent = ChatAgent(system_prompt=CHAT_MODE_PROMPT, mode="offline", tools_enabled=False)
     agent.auto_route  = False
     agent.manual_mode = False
 
@@ -167,8 +167,10 @@ async def main(page: ft.Page):
 
     async def on_chat_mode_change(val: str):
         if val == "Chat":
+            agent.set_tools_enabled(False)
             agent.set_system_prompt(CHAT_MODE_PROMPT)
         else:
+            agent.set_tools_enabled(True)
             agent.set_system_prompt(RUN_MODE_PROMPT)
 
     conn_toggle      = PillToggle(["Offline", "Online"], on_change=on_conn_change,      initial=0)

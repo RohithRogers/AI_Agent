@@ -26,9 +26,9 @@ def main():
     if args.command == "chat":
         start_chat(args.mode)
     elif args.command == "run":
-        RUN_MODE_PROMPT = "You are a technical assistant. If code is requested, return ONLY raw executable code without markdown, comments, or explanations."
-        agent = ChatAgent(system_prompt=RUN_MODE_PROMPT, mode=args.mode)
-        console.print(f"[bold red]Running Automated Task:[/bold red] {args.task}")
+        RUN_MODE_PROMPT = "You are a powerful AI Agent with full access to system tools. Use them to help the user complete their tasks."
+        agent = ChatAgent(system_prompt=RUN_MODE_PROMPT, mode=args.mode, tools_enabled=True)
+        console.print(f"[bold red]Running Task:[/bold red] {args.task}")
         theme = get_theme()
         prefix_text = f"[{theme['agent']}]{agent.model}[{agent.mode}] ❯ [/{theme['agent']}]"
         full_response = ""

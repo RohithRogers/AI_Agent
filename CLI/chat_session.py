@@ -13,14 +13,16 @@ import CLI.theme as theme_mod
 from CLI.theme import console, get_theme, update_console_theme, apply_theme_placeholders
 from CLI.ui import format_response, render_terminal_box, show_welcome_panel
 from CLI.mcp_loader import _load_mcp_from_env
+from remote.telegram_tool import start_bot_chat 
 
 def start_chat(mode="offline"):
     # Define our two mode prompts
-    CHAT_MODE_PROMPT = "You are a helpful AI assistant with access to local tools. Use markdown for code and lists."
-    RUN_MODE_PROMPT = "You are a technical assistant. If code is requested, return ONLY raw executable code without markdown, comments, or explanations."
+    CHAT_MODE_PROMPT = "You are a helpful AI assistant. You are in CHAT mode and do NOT have access to tools. Focus on conversation and answering questions. If you need to use tools ask the user to change to AGENT mode (/agent) for task execution."
+    RUN_MODE_PROMPT = "You are a powerful AI Agent with full access to system tools. Use them to help the user complete their tasks."
+    TELEGRAM_MODE_PROMPT = "You are an AI Agent controlled via Telegram. You have access to system tools. Respond through the Telegram bridge."
     
     current_mode = "chat"
-    agent = ChatAgent(system_prompt=CHAT_MODE_PROMPT, mode=mode)
+    agent = ChatAgent(system_prompt=CHAT_MODE_PROMPT, mode=mode, tools_enabled=False)
     multiline_mode = False
     
     show_welcome_panel(agent, current_mode)
@@ -136,7 +138,7 @@ def start_chat(mode="offline"):
                     t.sleep(1)
                     break
                 elif cmd == "/cls":
-                    os.system('cls' if os.name == 'nt' else 'clear')
+                    os.system('cls')
                     show_welcome_panel(agent, current_mode)
                     continue
                 elif cmd == "/help":
@@ -144,10 +146,10 @@ def start_chat(mode="offline"):
                     help_content = (
                         f"[{command_theme['accent']}]Available Commands:[/{command_theme['accent']}]\n"
                         f"  /chat           - Switch to CHAT Mode (conversational)\n"
-                        f"  /run            - Switch to RUN Mode (direct code execution)\n"
+                        f"  /agent          - Switch to AGENT Mode (direct code execution)\n"
                         f"  /voice          - Interactive voice input mode\n"
                         f"  /cls            - Clear console screen (keeps history)\n"
-                        f"  /online         - Use Gemini Cloud API (Advanced capabilities)\n"
+                        f"  /online         - Use Gemini/Groq Cloud API (Advanced capabilities)\n"
                         f"  /offline        - Use Ollama Local LLMs (Private & Free)\n"
                         f"  /auto           - Toggle intelligent model routing (auto-selects models according to request)\n"
                         f"  /manual         - Toggle to manual model selection\n"
@@ -157,11 +159,13 @@ def start_chat(mode="offline"):
                         f"  /set_model <m>  - Switch the current model (e.g., deepseek-coder)\n"
                         f"  /list_models    - See available local/online models\n"
                         f"  /mcp <n> <c>    - Connect an MCP Tool Server\n"
+                        f"  /mount <path>   - Mount/change working directory for tools\n"
                         f"  /save           - Save current conversation to JSON\n"
                         f"  /clear          - Clear conversation history\n"
                         f"  /paste          - Multi-line paste mode (Ctrl+Z to finish)\n"
                         f"  /multiline      - Toggle permanent multi-line input mode\n"
                         f"  /help           - Show this command list\n"
+                        f"  /telegram       - Gives the controls to bot session\n"
                         "  /exit           - Close the application\n"
                         "  /theme <name>   - Switch UI theme (green/blue)"
                     )
@@ -190,15 +194,43 @@ def start_chat(mode="offline"):
                     agent.set_mode("offline")
                     console.print(f"[{get_theme()['accent']}]Mode switched to OFFLINE (Model: {agent.model})[/{get_theme()['accent']}]")
                     continue
+                elif cmd == "/telegram":
+                    import config
+                    import importlib
+                    importlib.reload(config)
+                    
+                    if not config.TELEGRAM_BOT_TOKEN:
+                        console.print(f"[{get_theme()['error']}]❌ Error: TELEGRAM_BOT_TOKEN missing in environment or .env file.[/{get_theme()['error']}]")
+                        continue
+                        
+                    current_mode = "telegram"
+                    agent.set_tools_enabled(True)
+                    agent.set_system_prompt(TELEGRAM_MODE_PROMPT)
+                    console.print(f"[{get_theme()['error']}]Mode switched to TELEGRAM (Listening on Bot...)[/{get_theme()['error']}]")
+                    try:
+                        asyncio.run(start_bot_chat(agent))
+                    except KeyboardInterrupt:
+                        pass # Normal exit handled below
+                    except Exception as e:
+                        console.print(f"[{get_theme()['error']}]❌ Bot Error: {e}[/{get_theme()['error']}]")
+                    
+                    # Ensure we always return to a safe state
+                    console.print(f"\n[{get_theme()['warning']}]Telegram mode exited. Returning to CLI.[/{get_theme()['warning']}]")
+                    current_mode = "chat"
+                    agent.set_tools_enabled(False)
+                    agent.set_system_prompt(CHAT_MODE_PROMPT)
+                    continue
                 elif cmd == "/chat":
                     current_mode = "chat"
+                    agent.set_tools_enabled(False)
                     agent.set_system_prompt(CHAT_MODE_PROMPT)
-                    console.print(f"[{get_theme()['info']}]Mode switched to CHAT (Conversational)[/{get_theme()['info']}]")
+                    console.print(f"[{get_theme()['info']}]Mode switched to CHAT (Tools Disabled)[/{get_theme()['info']}]")
                     continue
-                elif cmd == "/run":
-                    current_mode = "run"
+                elif cmd == "/agent":
+                    current_mode = "agent"
+                    agent.set_tools_enabled(True)
                     agent.set_system_prompt(RUN_MODE_PROMPT)
-                    console.print(f"[{get_theme()['error']}]Mode switched to RUN (Code Only)[/{get_theme()['error']}]")
+                    console.print(f"[{get_theme()['error']}]Mode switched to AGENT (Tools Enabled)[/{get_theme()['error']}]")
                     continue
                 elif cmd == "/clear":
                     agent.messages = [{"role": "system", "content": agent.base_system_prompt + agent.tools_prompt}]
@@ -214,6 +246,20 @@ def start_chat(mode="offline"):
                     else:
                         console.print("[yellow]Usage: /mcp <name> <command>[/yellow]")
                         console.print("[dim]Example: /mcp google npx -y @modelcontextprotocol/server-google-search[/dim]")
+                    continue
+                elif cmd.startswith("/mount") or cmd.startswith("/cd"):
+                    parts = user_input.split(maxsplit=1)
+                    if len(parts) >= 2:
+                        path_str = parts[1].strip().strip('"').strip("'")
+                        try:
+                            # Expand user's home directory if they use ~
+                            path_str = os.path.expanduser(path_str)
+                            os.chdir(path_str)
+                            console.print(f"[{get_theme()['success']}]Mounted. Working directory is now: {os.getcwd()}[/{get_theme()['success']}]")
+                        except Exception as e:
+                            console.print(f"[{get_theme()['error']}]Error mounting to {path_str}: {e}[/{get_theme()['error']}]")
+                    else:
+                        console.print(f"[{get_theme()['info']}]Current directory: {os.getcwd()}\nUsage: /mount <path>[/{get_theme()['info']}]")
                     continue
                 elif cmd == "/save":
                     import json
@@ -289,6 +335,8 @@ def start_chat(mode="offline"):
                                 parts = chunk.split(":", 2)
                                 tool_name = parts[1]
                                 tool_params = parts[2]
+                                if len(tool_params) > 60:
+                                    tool_params = tool_params[:60] + "...}"
                                 
                                 live.stop()
                                 console.print(f"\n[{get_theme()['warning']}]🛡️ Permission Required:[/{get_theme()['warning']}] Tool [{get_theme()['accent']}]{tool_name}[/{get_theme()['accent']}] called with parameters [dim]{tool_params}[/dim]")
@@ -311,6 +359,8 @@ def start_chat(mode="offline"):
                                     chunk = gen.send(True)
                                 else:
                                     chunk = gen.send(False)
+                            elif isinstance(chunk, str) and chunk.startswith("__TOOL_CALL__"):
+                                chunk = next(gen)
                             elif isinstance(chunk, str) and chunk.startswith("__UI_STATUS__"):
                                 status_raw = chunk.replace("__UI_STATUS__:", "")
                                 if status_raw.startswith("EXEC_CMD:"):

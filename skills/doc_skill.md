@@ -1,0 +1,1 @@
+DESCRIPTION: This skill helps you to create stunning word documents.

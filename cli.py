@@ -15,8 +15,9 @@ from tools import (
     doc_tool, 
     browser_tool,
     ppt_tool,
-    code_tool
+    code_tool,
 )
+from remote import telegram_tool
 from CLI.commands import main
 
 if __name__ == "__main__":

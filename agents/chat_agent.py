@@ -8,77 +8,104 @@ from tools.registry import registry
 from tools.mcp_registry import mcp_manager
 from google import genai
 from google.genai import types
+from groq import Groq
+from skills.skill_registry import skill_registry
+from agents.context import ContextManager
+
+skill_registry_inst = skill_registry()
+skill_registry_inst.register_skills()
+
+
 
 # Create console for internal logging/debugging
 console = Console()
 
 class ChatAgent(BaseAgent):
-    def __init__(self, model="deepseek-coder", system_prompt="", mode="offline"):
+    def __init__(self, model="deepseek-coder", system_prompt="", mode="offline", tools_enabled=True):
         # Store original prompts for mode switching
         self.mode = mode
+        self.tools_enabled = tools_enabled
         self.base_system_prompt = system_prompt
         self.available_models = ["deepseek-coder","functiongemma"]
         
         # Initialize MCP if configured in .env or config (TBD)
         self._update_tools_prompt()
         
-        super().__init__(model, self.base_system_prompt + self.tools_prompt)
+        super().__init__(model, self.base_system_prompt + (self.tools_prompt if self.tools_enabled else ""))
         
         self.online_models = []
         self.fallback_models = []
         
         # History management settings
-        self.max_history_messages = 20
-        self.retain_messages = 6
+        self.max_history_chars = 60_000   # ~15k tokens; triggers pruning
+        self.emergency_history_chars = 20_000  # aggressive prune threshold for fallbacks
+        self.max_tool_output_chars = 3_000  # max chars saved per tool response
+        self.retain_messages = 6  # min recent messages always kept
         
         # Initialize GenAI client if in online mode
         if self.mode != "offline":
-            from config import CLOUD_MODE
-            self.client = genai.Client(api_key=CLOUD_MODE)
+            from config import ONLINE_MODE_GEMINI,ONLINE_MODE_GROQ
+            self.client = genai.Client(api_key=ONLINE_MODE_GEMINI)
+            self.groq_client = Groq(api_key=ONLINE_MODE_GROQ)
             self._fetch_online_models()
             # Ensure model is a valid model if none provided
-            if "gemini" not in self.model.lower() and "gemma" not in self.model.lower():
+            if not any(x in self.model.lower() for x in ["gemini", "gemma", "llama", "mixtral", "groq"]):
                 self.model = self.online_models[0] if self.online_models else "gemini-2.0-flash"
+        # Initialize new Context Manager
+        self.context = ContextManager(
+            token_budget=self.max_history_chars,
+            summary_threshold=int(self.max_history_chars * 0.8)
+        )
+        self.context.update_system_prompt(self.base_system_prompt + (self.tools_prompt if self.tools_enabled else ""))
 
     def _fetch_online_models(self):
-        """Fetches available models from the API and categorizes them."""
+        """Fetches available models from Gemini and Groq APIs."""
+        self.online_models = []
+        
+        # 1. Fetch Gemini Models
         try:
-            all_models = self.client.models.list()
-            # Most Gemini/Gemma models support generation. We filter out embeddings and other specialty models.
-            self.online_models = []
-            for m in all_models:
+            all_gemini = self.client.models.list()
+            for m in all_gemini:
                 name = m.name.replace("models/", "")
-                # Skip embedding and other non-chat models
                 if any(x in name for x in ["embedding", "aqa", "lyria", "robotics", "computer-use"]):
                     continue
                 self.online_models.append(name)
-            
-            # Prioritize Gemma models as fallbacks
-            self.fallback_models = [m for m in self.online_models if "gemma" in m.lower()]
-            # Ensure gemma-4-31b-it is high in fallback priority if it exists
-            self.fallback_models.sort(key=lambda x: "gemma-4" in x.lower() or "gemma-3" in x.lower(), reverse=True)
-            
-            # If no gemma models, use flash-lite as fallback
-            if not self.fallback_models:
-                self.fallback_models = [m for m in self.online_models if "flash-lite" in m.lower()]
         except Exception as e:
-            console.log(f"[warning]Failed to fetch online models: {e}[/warning]")
-            # Fallback to hardcoded list if API call fails
-            self.online_models = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemma-2-9b-it"]
-            self.fallback_models = ["gemma-2-9b-it"]
+            console.log(f"[warning]Failed to fetch Gemini models: {e}[/warning]")
+
+        # 2. Fetch Groq Models
+        if hasattr(self, 'groq_client') and self.groq_client:
+            try:
+                all_groq = self.groq_client.models.list()
+                for m in all_groq.data:
+                    # Filter for chat-capable models (heuristic)
+                    if any(x in m.id.lower() for x in ["llama", "mixtral", "gemma", "whisper"]):
+                        if "whisper" in m.id.lower(): continue # Skip whisper (audio)
+                        self.online_models.append(m.id)
+            except Exception as e:
+                console.log(f"[warning]Failed to fetch Groq models: {e}[/warning]")
+        
+        # Default fallback list if everything fails
+        if not self.online_models:
+            self.online_models = ["gemini-2.0-flash", "llama-3.3-70b-versatile", "mixtral-8x7b-32768"]
+
+        # Prioritize fallbacks
+        self.fallback_models = ["gemma-4-31b-it","gemma-4-26b-a4b-it","gemma-3-27b-it","llama-3.1-8b-instant","gemma-3-12b-it"]
+        
 
     def set_system_prompt(self, new_prompt):
         """Updates the system prompt while maintaining the message structure."""
         self.base_system_prompt = new_prompt
-        # Update the system message (usually at index 0)
-        if self.messages and self.messages[0]["role"] == "system":
-            self.messages[0]["content"] = self.base_system_prompt + self.tools_prompt
-        else:
-            # Fallback if no system message exists
-            self.messages.insert(0, {"role": "system", "content": self.base_system_prompt + self.tools_prompt})
+        content = self.base_system_prompt + (self.tools_prompt if self.tools_enabled else "")
+        self.context.update_system_prompt(content)
+
 
     def _update_tools_prompt(self):
         """Refreshes the tools JSON schema in the system prompt."""
+        if not self.tools_enabled:
+            self.tools_prompt = ""
+            return
+
         tool_schemas = registry.get_tool_schemas()
         self.tools_prompt = f"""
 You are an advanced AI agent with access to a REAL persistent PowerShell session.
@@ -89,6 +116,14 @@ TASK EXECUTION FLOW:
 2. ACT: Execute ONE tool (JSON) per response if the task is not done.
 3. OBSERVE: Receive the tool output and then decide on the next action.
 4. FINISH: Only provide a final summary IF the task is fully verified and complete.
+
+SKILLS:
+Skills are task-specific knowledge modules that you can call to get information to perform tasks. 
+They provide you with exact process flow to finish a task. You can call them using the 'get_skill_content' tool.
+Like how to create advanced level documents, pdfs, spreadsheets, presentations, how to use APIs, how to do complex coding tasks, etc.
+Skills are optional but use them if the user wants the best results. If a relevant skill exists, it is recommended to call it as it can provide you with the exact steps to finish a task.
+Example: {{"tool": "get_skill_content", "parameters": {{"skill_name": "pdf_skill.md"}}}}
+{json.dumps(skill_registry_inst.list_skills(), indent=2)}
 
 IMPORTANT RULES:
 - If you say you will do something, you MUST execute the tool in the same response.
@@ -103,12 +138,14 @@ AVAILABLE TOOLS:
 {json.dumps(tool_schemas, indent=2)}
 """
         
-        # Update current system message if it exists
-        if hasattr(self, 'messages') and self.messages and self.messages[0]["role"] == "system":
-            self.messages[0]["content"] = self.base_system_prompt + self.tools_prompt
+        # Update context
+        self.context.update_system_prompt(self.base_system_prompt + self.tools_prompt)
 
     def _get_gemini_tools(self):
         """Converts registry tools to Gemini genai.types.Tool format."""
+        if not self.tools_enabled:
+            return None
+            
         declarations = []
         for tool_name, tool_info in registry.tools.items():
             declarations.append(types.FunctionDeclaration(
@@ -121,10 +158,10 @@ AVAILABLE TOOLS:
             return None
         return [types.Tool(function_declarations=declarations)]
 
-    def _get_gemini_messages(self):
+    def _get_gemini_messages(self, messages):
         """Converts internal message history to Google GenAI format, supporting tool calls."""
         gemini_messages = []
-        for msg in self.messages:
+        for msg in messages:
             if msg["role"] == "system":
                 continue
             
@@ -139,7 +176,10 @@ AVAILABLE TOOLS:
             
             if "gemini_attachments" in msg:
                 for att in msg["gemini_attachments"]:
-                    parts.append(att)
+                    parts.append(types.Part.from_uri(
+                        file_uri=att.uri,
+                        mime_type=att.mime_type
+                    ))
                     
             if content and not tool_call_part:
                 parts.append(types.Part.from_text(text=content))
@@ -167,8 +207,6 @@ AVAILABLE TOOLS:
                 if not isinstance(resp_content, (dict, list, str, int, float, bool)):
                     resp_content = str(resp_content)
                 
-                # Check for "auth error" related issues: 
-                # Some models expect a specific key structure or no ID if not provided in call
                 parts.append(types.Part.from_function_response(
                     name=resp_name,
                     response={"result": resp_content}
@@ -190,61 +228,71 @@ AVAILABLE TOOLS:
                 
         return gemini_messages
 
-    def _summarize_history(self):
-        """Compresses long conversation history into a summary to save tokens."""
-        if len(self.messages) <= self.max_history_messages:
-            return
-
-        # Keep system prompt (index 0) and the most recent N messages
-        system_msg = self.messages[0]
-        recent_messages = self.messages[-self.retain_messages:]
-        messages_to_summarize = self.messages[1:-self.retain_messages]
-
-        if not messages_to_summarize:
-            return
-
-        summary_prompt = "Summarize the following conversation history into a concise list of key points and important context. Focus on what has been accomplished and current state. Reply ONLY with the summary.\n\n"
-        for msg in messages_to_summarize:
+    def _get_groq_messages(self, messages):
+        """Converts internal message history to Groq/OpenAI format."""
+        groq_messages = []
+        for msg in messages:
             role = msg["role"]
             content = msg.get("content", "")
-            if not content and "tool_call" in msg:
-                content = f"[Tool Call: {msg['tool_call']['name']}]"
-            elif not content and "tool_call_part" in msg:
-                 content = f"[Tool Call: {msg['tool_call_part'].function_call.name}]"
-            elif not content and "tool_response" in msg:
-                 content = f"[Tool Response: {msg['tool_response']['name']}]"
-            summary_prompt += f"{role.upper()}: {content}\n"
-
-        try:
-            console.log("[info]Summarizing history to save tokens...[/info]")
-            if self.mode == "offline":
-                resp = ollama.chat(model=self.model, messages=[
-                    {"role": "user", "content": summary_prompt}
-                ])
-                summary = resp['message']['content']
-            else:
-                # Use a lightweight model for summarization if possible
-                summary_model = "gemini-2.0-flash-lite" if "gemini" in self.model.lower() else self.model
-                resp = self.client.models.generate_content(
-                    model=summary_model,
-                    contents=summary_prompt
-                )
-                summary = resp.text
-
-            new_summary_msg = {
-                "role": "user", 
-                "content": f"[Previous Conversation Summary: {summary}]"
-            }
             
-            # Reconstruct history: System + Summary + Recent
-            self.messages = [system_msg, new_summary_msg] + recent_messages
-            console.log("[info]History summarized successfully.[/info]")
-        except Exception as e:
-            console.log(f"[warning]Failed to summarize history: {e}[/warning]")
+            # Handle tool calls in Groq format
+            tool_call_part = msg.get("tool_call_part")
+            tool_response = msg.get("tool_response")
+            
+            if tool_call_part:
+                # Groq tool call format
+                import time
+                groq_messages.append({
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": [{
+                        "id": getattr(tool_call_part.function_call, "id", "call_" + str(time.time())),
+                        "type": "function",
+                        "function": {
+                            "name": tool_call_part.function_call.name,
+                            "arguments": json.dumps(tool_call_part.function_call.args)
+                        }
+                    }]
+                })
+                continue
+            
+            if tool_response:
+                groq_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_response.get("id", "call_none"),
+                    "name": tool_response["name"],
+                    "content": str(tool_response["content"])
+                })
+                continue
+
+            groq_messages.append({"role": role, "content": content})
+        return groq_messages
+
+    def _get_groq_tools(self):
+        """Converts registry tools to Groq/OpenAI tool format."""
+        if not self.tools_enabled:
+            return None
+            
+        groq_tools = []
+        for tool_name, tool_info in registry.tools.items():
+            groq_tools.append({
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": tool_info["description"],
+                    "parameters": tool_info["parameters"]
+                }
+            })
+        return groq_tools if groq_tools else None
 
     def set_model(self, model):
         """Sets the model to use and refreshes tools."""
         self.model = model
+        self._update_tools_prompt()
+
+    def set_tools_enabled(self, enabled):
+        """Enable or disable tool access."""
+        self.tools_enabled = enabled
         self._update_tools_prompt()
 
     def set_mode(self, mode):
@@ -255,11 +303,26 @@ AVAILABLE TOOLS:
         self.mode = mode
         if self.mode != "offline":
             if not hasattr(self, 'client'):
-                from config import CLOUD_MODE
-                self.client = genai.Client(api_key=CLOUD_MODE)
+                try:
+                    from config import ONLINE_MODE_GEMINI, ONLINE_MODE_GROQ
+                    # Handle API key initialization and verification
+                    if ONLINE_MODE_GEMINI:
+                        self.client = genai.Client(api_key=ONLINE_MODE_GEMINI)
+                    if ONLINE_MODE_GROQ:
+                        self.groq_client = Groq(api_key=ONLINE_MODE_GROQ)
+                    
+                    if not self.client and not self.groq_client:
+                        console.log("[warning]No API keys found. Please set ONLINE_MODE_GEMINI or ONLINE_MODE_GROQ in config.py[/warning]")
+                        self.mode = "offline"
+                        return
+                        
+                except ImportError:
+                    from config import CLOUD_MODE
+                    self.client = genai.Client(api_key=CLOUD_MODE)
+                    self.groq_client = None
             self._fetch_online_models()
-            # Ensure a valid Gemini model is selected if current model is local
-            if "gemini" not in self.model.lower() and "gemma" not in self.model.lower():
+            # Ensure a valid model is selected if current model is local
+            if not any(x in self.model.lower() for x in ["gemini", "gemma", "llama", "mixtral", "groq"]):
                 self.model = self.online_models[0] if self.online_models else "gemini-2.0-flash"
         else:
             self.model = "deepseek-coder"
@@ -283,20 +346,16 @@ AVAILABLE TOOLS:
                 if os.path.exists(path):
                     # For UI feedback during upload, we would yield here, but run() is a generator
                     # so we will just log it for now and it will block briefly.
-                    console.log(f"[info]Uploading attachment:[/info] {os.path.basename(path)}")
-                    uploaded_file = self.client.files.upload(file=path)
-                    uploaded_attachments.append(uploaded_file)
+                    try:
+                        console.log(f"[info]Uploading attachment:[/info] {os.path.basename(path)}")
+                        uploaded_file = self.client.files.upload(file=path)
+                        uploaded_attachments.append(uploaded_file)
+                    except Exception as e:
+                        console.log(f"[error]Failed to upload attachment:[/error] {os.path.basename(path)}")
                 else:
                     console.log(f"[warning]File not found:[/warning] {path}")
 
-        new_msg = {"role": "user", "content": user_input}
-        if uploaded_attachments:
-            new_msg["gemini_attachments"] = uploaded_attachments
-        
-        # Optional: For Ollama, we might be able to add images directly using base64, 
-        # but requires specific keys. We skip for offline right now or handle later if requested.
-        
-        self.messages.append(new_msg)
+        self.context.add_message("user", user_input, gemini_attachments=uploaded_attachments)
         
         if getattr(self, "auto_route", False) and self.mode != "offline":
             try:
@@ -346,15 +405,30 @@ AVAILABLE TOOLS:
                 step_count += 1
                 full_content = ""
                 
-                # Manage history size before each model call
-                self._summarize_history()
+                # Provide model client for summarization if available
+                if hasattr(self, 'client') and self.context.model_client is None:
+                    self.context.model_client = self.client
+                
+                # Get optimized context
+                current_context = self.context.get_context()
                 
                 try:
                     if self.mode == "offline":
-                        stream = ollama.chat(model=self.model, messages=self.messages, stream=True)
+                        stream = ollama.chat(model=self.model, messages=current_context, stream=True)
+                    elif self.groq_client and any(x in self.model.lower() for x in ["llama", "mixtral", "groq", "gemma"]):
+                        # Groq execution logic
+                        groq_msgs = self._get_groq_messages(current_context)
+                        active_model = self.model
+                        stream = self.groq_client.chat.completions.create(
+                            model=active_model,
+                            messages=groq_msgs,
+                            tools=self._get_groq_tools(),
+                            stream=True
+                        )
                     else:
-                        gemini_msgs = self._get_gemini_messages()
-                        system_instr = self.messages[0]["content"] if self.messages[0]["role"] == "system" else ""
+                        # Gemini execution logic
+                        gemini_msgs = self._get_gemini_messages(current_context)
+                        system_instr = next((m["content"] for m in current_context if m["role"] == "system"), "")
                         active_model = self.model
                         
                         stream = self.client.models.generate_content_stream(
@@ -377,6 +451,34 @@ AVAILABLE TOOLS:
                             if token:
                                 has_yielded_token = True
                                 full_content += token
+                        elif self.groq_client and any(x in self.model.lower() for x in ["llama", "mixtral", "groq"]):
+                            # Groq Stream Handling
+                            if chunk.choices:
+                                delta = chunk.choices[0].delta
+                                token = delta.content or ""
+                                if token:
+                                    has_yielded_token = True
+                                    full_content += token
+                                
+                                if delta.tool_calls:
+                                    is_tool_call = True
+                                    tc = delta.tool_calls[0]
+                                    if not native_tool_call:
+                                        native_tool_call = types.Part(
+                                            function_call=types.FunctionCall(
+                                                name=tc.function.name,
+                                                args={},
+                                                id=tc.id
+                                            )
+                                        )
+                                    if tc.function.arguments:
+                                        # Incremental JSON parsing/buffering
+                                        if not hasattr(self, '_groq_tc_buffer'): self._groq_tc_buffer = ""
+                                        self._groq_tc_buffer += tc.function.arguments
+                                        try:
+                                            native_tool_call.function_call.args = json.loads(self._groq_tc_buffer)
+                                        except:
+                                            pass
                         else:
                             token = ""
                             # Handle native tool calls
@@ -401,6 +503,11 @@ AVAILABLE TOOLS:
                             if token:
                                 has_yielded_token = True
                                 full_content += token
+
+                        if not self.tools_enabled:
+                            yield full_content[yielded_len:]
+                            yielded_len = len(full_content)
+                            continue
 
                         # Detect JSON tool call marker (for offline mode or online models like Gemma that might output JSON)
                         if not is_tool_call:
@@ -471,15 +578,30 @@ AVAILABLE TOOLS:
                     # Handle specific API errors for better user feedback
                     if "503" in err_str or "high demand" in err_str.lower():
                         yield "__UI_STATUS__:🚨 [bold yellow]Model Overloaded[/bold yellow]: The API is busy. Retrying automatically in next step or wait few seconds."
-                    elif "429" in err_str:
-                         yield "__UI_STATUS__:🚨 [bold red]Quota Exceeded[/bold red]: Retrying with fallback model..."
-                         if self.fallback_models and active_model != self.fallback_models[0]:
-                             self.model = self.fallback_models[0]
-                             console.log(f"[info]Quota hit. Switched to fallback model: {self.model}[/info]")
+                    elif any(err in err_str.lower() for err in ["429", "404", "not found"]):
+                         if not getattr(self, "auto_route", False):
+                             yield f"__UI_STATUS__:❌ [bold red]API Error[/bold red]: {err_str} (Use /auto to enable automatic model fallback)"
+                             break
+                             
+                         yield "__UI_STATUS__:🚨 [bold red]API Error/Quota[/bold red]: Retrying with next fallback model..."
+                         
+                         # Memory relief: aggressively prune context before retrying
+                         system_msg = self.messages[0]
+                         self.messages = [system_msg] + self.messages[-4:]
+                         self._prune_tool_responses()
+                         console.log(f"[info]Context pruned for fallback. Size: {self._get_context_chars()} chars.[/info]")
+                         
+                         current_idx = -1
+                         if self.fallback_models and active_model in self.fallback_models:
+                             current_idx = self.fallback_models.index(active_model)
+                         
+                         if self.fallback_models and current_idx + 1 < len(self.fallback_models):
+                             self.model = self.fallback_models[current_idx + 1]
+                             console.log(f"[info]API Error. Switched to fallback model: {self.model}[/info]")
                              step_count -= 1 # Repeat the step with new model
                              continue
                          else:
-                             yield "__UI_STATUS__:🚨 [bold red]Quota Exceeded[/bold red]: All fallback models exhausted or rate limit too high."
+                             yield "__UI_STATUS__:🚨 [bold red]API Error[/bold red]: All fallback models exhausted."
                              break
                     elif "blocked" in err_str.lower() or "safety" in err_str.lower():
                         yield "__UI_STATUS__:🛡️ [bold orange]Response Blocked[/bold orange]: The model's safety filters prevented this response."
@@ -510,8 +632,18 @@ AVAILABLE TOOLS:
                                 raise ValueError("Could not extract valid JSON tool call from response.")
                             
                             # Be flexible with keys
-                            tool_name = tool_data.get("tool") or tool_data.get("tool_name") or tool_data.get("function")
-                            tool_params = tool_data.get("parameters") or tool_data.get("args") or tool_data.get("arguments") or {}
+                            tool_name = tool_data.get("tool") or tool_data.get("tool_name") or tool_data.get("function") or tool_data.get("skill")
+                            
+                            # Special case: if 'skill' was used as a direct key
+                            if "skill" in tool_data and not tool_name:
+                                tool_name = "get_skill_content"
+                                tool_params = {"skill_name": tool_data["skill"]}
+                            elif tool_data.get("skill") == tool_name:
+                                # For {"skill": "read_codebase.md"}
+                                tool_name = "get_skill_content"
+                                tool_params = {"skill_name": tool_data["skill"]}
+                            else:
+                                tool_params = tool_data.get("parameters") or tool_data.get("args") or tool_data.get("arguments") or {}
                             
                             if not tool_name:
                                 raise ValueError("No tool name found in JSON blob.")
@@ -546,47 +678,31 @@ AVAILABLE TOOLS:
                             yield f"__UI_STATUS__:✅ Tool [accent]{tool_name}[/accent] finished."
                             result = str(result)
 
-                        # Update History
+                        # Truncate large tool outputs before storing in history
+                        stored_result = self.context.truncate_content(result, max_chars=self.max_tool_output_chars)
+
+                        # Update Context
                         if native_tool_call:
-                            # Reconstruct the tool call part to ensure it's a clean data object
-                            # rather than a 'live' part from the stream
-                            clean_call_part = types.Part.from_function_call(
-                                name=native_tool_call.function_call.name,
-                                args=native_tool_call.function_call.args
-                            )
-                            
                             # Get the FunctionCall ID if available
                             func_id = getattr(native_tool_call.function_call, "id", None)
-                            if func_id:
-                                clean_call_part.function_call.id = func_id
-
-                            self.messages.append({
-                                "role": "assistant", 
-                                "content": full_content, 
-                                "tool_call_part": clean_call_part
-                            })
-                            
-                            self.messages.append({
-                                "role": "user", 
-                                "content": "", 
-                                "tool_response": {"id": func_id, "name": tool_name, "content": result}
-                            })
+                            self.context.add_message("assistant", full_content, tool_call_part=native_tool_call)
+                            self.context.add_message("user", "", tool_response={"id": func_id, "name": tool_name, "content": stored_result})
                         else:
-                            self.add_message("assistant", full_content)
-                            self.add_message("user", f"Tool '{tool_name}' returned: {result}")
+                            self.context.add_message("assistant", full_content)
+                            self.context.add_message("user", f"Tool '{tool_name}' returned: {stored_result}")
                         
                         continue
                     except Exception as e:
                         yield f"__UI_STATUS__:❌ Error executing tool: {e}"
                         break
                 else:
-                    self.add_message("assistant", full_content)
+                    self.context.add_message("assistant", full_content)
                     
                     import re
                     clean_text = re.sub(r'<thought>(.*?)</thought>', '', full_content, flags=re.DOTALL).strip()
                     
                     if not clean_text and "<thought>" in full_content:
-                        self.add_message("user", "Proceed with the execution using tools.")
+                        self.context.add_message("user", "Proceed with the execution using tools.")
                         yield "__UI_STATUS__:🤔 Thought received. Prompting agent to execute plan..."
                         continue
                         
