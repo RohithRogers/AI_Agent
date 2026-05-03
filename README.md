@@ -1,99 +1,116 @@
-# AI Agent CLI 🤖
+# 🪐 Synthic – Advanced AI Agent CLI & GUI
 
-A powerful, extensible, and modular Command-Line Interface (CLI) AI agent framework built with Python. This agent features real-time streaming, voice recognition, persistent memory, and a custom tool registry.
+Synthic is a next-generation AI agent framework designed for seamless developer productivity. It combines a high-performance **Rich CLI** and a **Premium GUI** with a powerful tool registry, persistent terminal sessions, and a modular skill system.
 
-## 🌟 Features
+Powered by **Gemini 3.5**, **Groq**, and **Local LLMs**, Synthic adapts to your workflow, whether you're coding, researching, or managing infrastructure.
 
-- **🎙️ Voice Commands**: Interact with the agent using your microphone via the `/voice` command (powered by Vosk).
-- **🛠️ Tool Registry**: Extensible tool system allowing the agent to perform real-world tasks (e.g., file operations, time checks).
-- **🎨 Rich Terminal UI**: Beautiful, interactive terminal interface with markdown support, progress indicators, and status updates using the `rich` library.
-- **⚡ Dual Modes**:
-  - **Chat Mode**: Conversational AI for general assistance.
-  - **Run Mode**: Technical mode for generating raw executable code.
-- **📝 Streaming Responses**: Real-time token streaming for a responsive feel.
-- **💾 Session Management**: Save conversation history, clear context, and persist memory.
-- **🤖 LLM Integration**: Built to work with local models via Ollama (default: `deepseek-coder`).
+---
+
+## ✨ Key Capabilities
+
+- **🧠 Advanced Reasoning**: Built-in `<thought>` tagging for exposed chain-of-thought planning.
+- **🖥️ Persistent Terminal**: Access to a real, persistent PowerShell session that remembers state (dir, venv, git status) across interactions.
+- **🧩 Skill System**: Modular knowledge base. Synthic can "learn" how to use specific libraries or APIs by reading skill files (e.g., `git_skill.md`, `pdf_skill.md`).
+- **🎙️ Voice Interaction**: Hands-free operation with Vosk-powered voice-to-text commands.
+- **🖼️ Multimodal Power**: Generate high-fidelity images with Gemini Flash Image and videos with Veo 3.1.
+- **🔀 Auto-Routing**: Dynamically switches between models (Lite/Pro/Image/Video) based on task complexity to optimize cost and performance.
+- **💾 Smart Context**: A custom `ContextManager` handles history pruning, token budget enforcement, and automatic summarization.
+- **🛠️ Tool Registry**: Out-of-the-box support for Browser, Git, Python REPL, Document parsing (PDF/DOCX), Terminal command execution, and more.
+
+---
+
+## 🎨 Dual Interfaces
+
+### 1. Terminal CLI (`rich` powered)
+A sleek, interactive CLI featuring live markdown streaming, terminal-style execution boxes, and status indicators.
+- **Command**: `python cli.py chat`
+- **Single Task**: `python cli.py run "Deploy the app to Vercel"`
+
+### 2. Premium Desktop GUI (`flet` powered) - **Under Development** 
+A modern, dark-themed dashboard with message bubbles, collapsible terminal views, and real-time thought transparency.
+- **Command**: `python GUI/app.py`
+
+---
 
 ## 🚀 Getting Started
 
 ### Prerequisites
-
 - **Python 3.10+**
-- **Ollama**: Install from [ollama.ai](https://ollama.ai) and pull your preferred model:
-  ```bash
-  ollama pull deepseek-coder
-  ```
-- **Vosk Model**: (Optional, for voice) Download a Vosk model (e.g., `vosk-model-small-en-us-0.15`) and place it in the project root.
+- **API Keys**: Required for "Online" mode.
+  - `GOOGLE_API_KEY` (Gemini)
+  - `GROQ_API_KEY` (Groq/Llama)
+- **Local Models**: Install [Ollama](https://ollama.ai) for "Offline" mode.
 
-### Quick Start (Windows)
-
-If you are on Windows, you can use the automated launcher to set up the environment and start the agent:
-
-```batch
-run_agent.bat chat
-```
-This script will:
-1. Create a virtual environment (`myenv`) if it doesn't exist.
-2. Install all required dependencies from `requirements.txt`.
-3. Launch the AI Agent in chat mode.
-
-### Manual Installation
-
-4. **Configure environment variables**:
-   Create a `.env` file in the root directory:
-   ```env
-   LLM_MODEL=deepseek-coder
-   HISTORY_FILE_NAME=history.json
-   DEFAULT_SYSTEM_PROMPT="You are a helpful AI assistant."
+### Installation
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/RohithRogers/AI_Agent.git
+   cd llm_agent_cli
    ```
 
-## 🎮 Usage
+2. **Setup Environment**:
+   ```bash
+   python -m venv myenv
+   source myenv/bin/activate  # Windows: .\myenv\Scripts\activate
+   pip install -r requirements.txt
+   ```
 
-Launch the interactive CLI:
+3. **Configure Settings**:
+   Get your API_KEYS from gemini and groq and set them as environment variables as follow: 
+   ```env
+   GEMINI_API_KEY = your_api_key
+   GROQ_API_KEY = your_api_key
+   ```
+   And create a .env file with the following format:
+   ```env   
+   # Defaults
+   LLM_MODEL=deepseek-coder
+   HISTORY_FILE_NAME=history.json
+   ```
 
-```bash
-python cli.py chat
-```
+---
 
-### Slash Commands
+## 🎮 Usage Guide
 
-While in the chat, use these commands to control the session:
+### CLI Sub-commands
+| Command | Description |
+|:---|:---|
+| `chat [--mode online/offline]` | Start an interactive conversation with Synthic. |
+| `run <task>` | Execute a specific task and exit. |
+| `workspace --list` | View active sessions and persistent workspace stats. |
 
-- `/chat` - Switch to **Chat Mode** (Conversational).
-- `/run` - Switch to **Run Mode** (Code focusing).
-- `/voice` - Activate **Voice Input** (Speak to the agent).
-- `/save` - Save the current conversation to a JSON file.
-- `/clear` - Clear the current conversation history.
-- `/exit` - Exit the CLI.
+### In-Chat Slash Commands
+- `/voice` - Toggle microphone input.
+- `/save` - Export current session to JSON.
+- `/clear` - Reset context and start a fresh session.
+- `/mode <online/offline>` - Switch model backend on the fly.
+- `/skills` - List all available skills Synthic can use.
 
-### Run a Single Task
+---
 
-You can also run the agent for a single command without entering the interactive loop:
-
-```bash
-python cli.py run "Create a python script that calculates Fibonacci numbers"
-```
-
-## 📂 Project Structure
+## 📂 Project Architecture
 
 ```text
-├── agents/             # Agent logic and prompt management
-├── CLI/                # CLI command definitions and terminal UI
-├── memory/             # Handlers for conversation history/persistence
-├── tools/              # Custom tools (File, Time, Voice, etc.)
-├── cli.py              # Main CLI entry point
-├── config.py           # Configuration loader
-└── main.py             # Simple entry point script
+├── agents/             # Core brains (Synthic, Context Management, Routing)
+├── CLI/                # Terminal UI logic and layout
+├── GUI/                # Flet-based desktop application logic
+├── skills/             # Markdown-based "manuals" for specialized tasks
+├── tools/              # Extensible tool wrappers (Git, Browser, Terminal)
+├── memory/             # History persistence and JSON handlers
+├── config.py           # Global settings and environment loading
+└── cli.py              # Main unifying entry point
 ```
 
-## 🛠️ Contributing
+---
 
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+## 🛠️ Extensibility
+Synthic is designed to be modified.
+- **Add a Tool**: Create a new file in `tools/` and register it in `tools/registry.py`.
+- **Add a Skill**: Drop a `.md` file into `skills/`. Synthic automatically indexes it.
+- **Custom Theme**: Modify `CLI/theme.py` or `GUI/theme.py`.
+
+---
 
 ## 📄 License
+Open-source under the MIT License. Contributions are welcome to make Synthic even smarter!
 
-This is a open-source project. Feel free to contribute to this project.
