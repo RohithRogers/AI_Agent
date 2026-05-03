@@ -11,6 +11,9 @@ from google.genai import types
 from groq import Groq
 from skills.skill_registry import skill_registry
 from agents.context import ContextManager
+import uuid
+from tools.workspace_manager import workspace_manager
+from tools.utils import set_active_session
 
 skill_registry_inst = skill_registry()
 skill_registry_inst.register_skills()
@@ -28,6 +31,7 @@ class ChatAgent(BaseAgent):
         self.base_system_prompt = system_prompt
         self.available_models = ["deepseek-coder", "functiongemma"]
         self.model = model # Initialize model here so super().__init__ has it
+        self.session_id = str(uuid.uuid4())[:8]
         
         # 2. History management settings (needed for ContextManager)
         self.max_history_chars = 60_000
@@ -103,6 +107,15 @@ class ChatAgent(BaseAgent):
         content = self.base_system_prompt + (self.tools_prompt if self.tools_enabled else "")
         self.context.update_system_prompt(content)
 
+    def clear_history(self):
+        """Resets the context manager memory and initiates a new workspace session."""
+        self.session_id = str(uuid.uuid4())[:8]
+        self.context = ContextManager(
+            token_budget=self.max_history_chars,
+            summary_threshold=int(self.max_history_chars * 0.8)
+        )
+        self.context.update_system_prompt(self.base_system_prompt + self.tools_prompt)
+
 
     def _update_tools_prompt(self):
         """Refreshes the tools JSON schema in the system prompt."""
@@ -115,7 +128,7 @@ class ChatAgent(BaseAgent):
             skills_formatted = "\n".join([f"- {name}: {desc}" for name, desc in skills_list.items()])
             
             self.tools_prompt = f"""
-You are an advanced AI agent with access to a REAL persistent PowerShell session.
+You are the advanced AI agent 'Synthic' with access to a REAL persistent PowerShell session.
 Your actions persist (e.g., changing directories, installing packages).
 
 TASK EXECUTION FLOW:
@@ -344,6 +357,9 @@ AVAILABLE TOOLS:
         return self.available_models
 
     def run(self, user_input, attachments=None):
+        workspace_manager.begin_session(self.session_id, ephemeral=False)
+        set_active_session(self.session_id)
+
         if attachments is None:
             attachments = []
             
@@ -721,7 +737,7 @@ AVAILABLE TOOLS:
                         continue
                         
                     if clean_text:
-                        console.log("🏁 [info]Response generation complete.[/info]")
+                        yield "__UI_STATUS__:✅ Response generation complete."
                         break
                     else:
                         # If we have no clean text and no tool call, something is wrong
@@ -732,3 +748,6 @@ AVAILABLE TOOLS:
         except KeyboardInterrupt:
             console.log("\n[error]⚠️ Generation interrupted.[/error]")
             self.context.add_message("assistant", full_content + "... [Interrupted]")
+        finally:
+            workspace_manager.end_session(self.session_id, keep_outputs=True)
+            set_active_session(None)

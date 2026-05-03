@@ -18,6 +18,7 @@ from tools import (
     time_tool, file_tool, program_run_tool,
     python_repl_tool, git_tool, doc_tool,
     browser_tool, ppt_tool, code_tool, skill_tool,
+    workspace_tool,
 )
 
 import flet as ft
@@ -43,18 +44,18 @@ SIDEBAR_W   = 245
 TERMINAL_H  = 220
 
 CHAT_MODE_PROMPT = (
-    "You are a helpful AI assistant. You are in CHAT mode and do NOT have access to tools. "
+    "You are the helpful AI assistant 'Synthic'. You are in CHAT mode and do NOT have access to tools. "
     "Focus on conversation and answering questions."
 )
 RUN_MODE_PROMPT = (
-    "You are a powerful AI Agent with full access to system tools. "
+    "You are the powerful AI Agent 'Synthic' with full access to system tools. "
     "Use them to help the user complete their tasks."
 )
 
 # ─────────────────────────────────────────────────────────
 async def main(page: ft.Page):
     # ── Page config ───────────────────────────────────────
-    page.title        = "Free Code – AI Agent"
+    page.title        = "Synthic – AI Agent"
     page.theme_mode   = ft.ThemeMode.DARK
     page.theme        = build_theme()
     page.bgcolor      = SURFACE_DIM
@@ -210,10 +211,10 @@ async def main(page: ft.Page):
 
     # ── Clear chat ────────────────────────────────────────
     async def clear_chat(e=None):
-        agent.messages = [{
-            "role": "system",
-            "content": agent.base_system_prompt + agent.tools_prompt,
-        }]
+        if hasattr(agent, "clear_history"):
+            agent.clear_history()
+        else:
+            agent.messages = [{"role": "system", "content": agent.base_system_prompt + agent.tools_prompt}]
         chat_column.controls.clear()
         terminal_view.clear(page) # Assuming terminal_view.clear is still sync as it was and handles page.update internally or via return
         agent_bubble[0]  = None
@@ -453,11 +454,16 @@ async def main(page: ft.Page):
     async def on_save(e=None):
         import json, time
         fname = f"chat_save_{int(time.time())}.json"
+        
+        msgs_to_save = []
+        if hasattr(agent, "context") and hasattr(agent.context, "messages"):
+            # ContextManager is being used
+            msgs_to_save = [m for m in agent.context.messages if m.get("role") != "system"]
+        elif hasattr(agent, "messages"):
+            msgs_to_save = [m for m in agent.messages if m.get("role") != "system"]
+            
         with open(fname, "w", encoding="utf-8") as f:
-            json.dump(
-                [m for m in agent.messages if m.get("role") != "system"],
-                f, indent=2,
-            )
+            json.dump(msgs_to_save, f, indent=2, default=str)
         await show_snack(f"Saved → {fname}", SUCCESS)
 
     # ─────────────────────────────────────────────────────
@@ -515,7 +521,7 @@ async def main(page: ft.Page):
                 ft.Row(
                     [
                         ft.Icon(ft.Icons.AUTO_AWESOME, color=ACCENT_GLOW, size=16),
-                        ft.Text("Free Code", size=15, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
+                        ft.Text("Synthic", size=15, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
                     ],
                     spacing=6, tight=True,
                 ),

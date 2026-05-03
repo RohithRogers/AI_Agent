@@ -35,7 +35,7 @@ def build_logo() -> ft.Container:
                     [
                         ft.Icon(ft.Icons.AUTO_AWESOME, color=ACCENT_GLOW, size=22),
                         ft.Text(
-                            " FREE CODE",
+                            " SYNTHIC",
                             size=18,
                             weight=ft.FontWeight.BOLD,
                             color=TEXT_PRIMARY,

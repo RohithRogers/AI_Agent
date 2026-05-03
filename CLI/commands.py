@@ -21,10 +21,33 @@ def main():
     run_parser.add_argument("task", type=str, help="The task for the agent to execute")
     run_parser.add_argument("--mode", type=str, default="offline", help="Mode to run the agent in (offline/online)")
 
+    # Workspace command
+    workspace_parser = subparsers.add_parser("workspace", help="Manage the agent workspace")
+    workspace_parser.add_argument("--list", action="store_true", help="List persistent workspace exports and sessions stats")
+
     args = parser.parse_args()
 
     if args.command == "chat":
         start_chat(args.mode)
+    elif args.command == "workspace":
+        from tools.workspace_manager import workspace_manager
+        stats = workspace_manager.workspace_stats()
+        console.print("[bold cyan]Agent Workspace Stats[/bold cyan]")
+        console.print(f"Usage: [yellow]{stats['total_size_mb']} MB[/yellow] / {stats['max_size_mb']} MB")
+        
+        console.print("\n[bold green]Persistent Exports:[/bold green]")
+        if stats['persistent_exports']:
+            for exp in stats['persistent_exports']:
+                console.print(f"  • {exp}")
+        else:
+            console.print("  [dim]None[/dim]")
+            
+        console.print("\n[bold blue]Active Sessions:[/bold blue]")
+        if stats['active_sessions']:
+            for sess in stats['active_sessions']:
+                console.print(f"  • {sess}")
+        else:
+            console.print("  [dim]None[/dim]")
     elif args.command == "run":
         RUN_MODE_PROMPT = "You are a powerful AI Agent with full access to system tools. Use them to help the user complete their tasks."
         agent = ChatAgent(system_prompt=RUN_MODE_PROMPT, mode=args.mode, tools_enabled=True)

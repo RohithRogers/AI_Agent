@@ -55,5 +55,8 @@ telegram_test.py
 test.py
 test_gemini_history.py
 cool.md
-create_pdf.py
-AI_Transformers.pdf
+
+# Agent workspace — sessions are ephemeral, only exports are version-controlled
+workspace/sessions/
+workspace/workspace.log
+/tests/

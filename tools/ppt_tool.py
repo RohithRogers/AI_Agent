@@ -1,5 +1,6 @@
 import os
 from tools.registry import tool
+from tools.utils import resolve_workspace_path
 
 @tool(
     name="create_ppt",
@@ -27,6 +28,8 @@ from tools.registry import tool
 )
 def create_ppt(file_path: str, slides_content: list) -> str:
     """Creates a PPTX with the given slides."""
+    # Route bare filename into the active workspace session's outputs/ folder
+    file_path = resolve_workspace_path(file_path, sub="outputs")
     try:
         from pptx import Presentation
         prs = Presentation()

@@ -12,7 +12,7 @@ from tools.utils import validate_path
         },
         "required": ["path"]
     },
-    requires_permission=True
+    requires_permission=False
 )
 def read_file(path):
     try:

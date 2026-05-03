@@ -1,20 +1,15 @@
 @echo off
 set "PROJECT_DIR=d:\LLM_Agent\llm_agent_cli"
 
-echo ===========================================
-echo    Launching AI Agent from Desktop
-echo ===========================================
-
 :: Navigate to project directory (handles drive change)
 pushd "%PROJECT_DIR%"
 
 :: Activate existing virtual environment
 if exist "myenv\Scripts\activate.bat" (
-    echo [INFO] Activating environment...
     call "myenv\Scripts\activate.bat"
-    
     :: Run the agent in chat mode
-    echo [INFO] Starting agent...
+    echo -------------------------------------------
+    echo Loading Synthic...
     echo -------------------------------------------
     python cli.py chat %*
 ) else (

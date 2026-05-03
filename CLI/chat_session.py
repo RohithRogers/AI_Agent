@@ -17,9 +17,9 @@ from remote.telegram_tool import start_bot_chat
 
 def start_chat(mode="offline"):
     # Define our two mode prompts
-    CHAT_MODE_PROMPT = "You are a helpful AI assistant. You are in CHAT mode and do NOT have access to tools. Focus on conversation and answering questions. If you need to use tools ask the user to change to AGENT mode (/agent) for task execution."
-    RUN_MODE_PROMPT = "You are a powerful AI Agent with full access to system tools. Use them to help the user complete their tasks."
-    TELEGRAM_MODE_PROMPT = "You are an AI Agent controlled via Telegram. You have access to system tools. Respond through the Telegram bridge."
+    CHAT_MODE_PROMPT = "You are the helpful AI assistant 'Synthic'. You are in CHAT mode and do NOT have access to tools. Focus on conversation and answering questions. If you need to use tools ask the user to change to AGENT mode (/agent) for task execution."
+    RUN_MODE_PROMPT = "You are the powerful AI Agent 'Synthic' with full access to system tools. Use them to help the user complete their tasks."
+    TELEGRAM_MODE_PROMPT = "You are the powerful AI Agent 'Synthic' controlled via Telegram. You have access to system tools. Respond through the Telegram bridge."
     
     current_mode = "chat"
     agent = ChatAgent(system_prompt=CHAT_MODE_PROMPT, mode=mode, tools_enabled=False)
@@ -163,6 +163,7 @@ def start_chat(mode="offline"):
                         f"  /list_models    - See available local/online models\n"
                         f"  /mcp <n> <c>    - Connect an MCP Tool Server\n"
                         f"  /mount <path>   - Mount/change working directory for tools\n"
+                        f"  /workspace      - Show active workspace stats and persistent exports\n"
                         f"  /save           - Save current conversation to JSON\n"
                         f"  /clear          - Clear conversation history\n"
                         f"  /paste          - Multi-line paste mode (Ctrl+Z to finish)\n"
@@ -170,7 +171,7 @@ def start_chat(mode="offline"):
                         f"  /help           - Show this command list\n"
                         f"  /telegram       - Gives the controls to bot session\n"
                         "  /exit           - Close the application\n"
-                        "  /theme <name>   - Switch UI theme (green/blue)"
+                        "  /theme <name>   - Switch UI theme (use '/theme help' to see available themes)"
                     )
                     console.print(Panel(help_content, title="Help Menu", border_style=get_theme()["accent"]))
                     continue
@@ -182,6 +183,9 @@ def start_chat(mode="offline"):
                             theme_mod.current_theme_name = new_theme
                             theme_mod.update_console_theme()
                             console.print(f"[success]Theme switched to {new_theme.upper()}[/success]")
+                            os.system('cls')
+                            show_welcome_panel(agent, current_mode)
+                            continue
                         else:
                             console.print(f"[warning]Available themes: {', '.join(theme_mod.THEME_CONFIGS.keys())}[/warning]")
                     else:
@@ -265,6 +269,26 @@ def start_chat(mode="offline"):
                     else:
                         console.print(f"[{get_theme()['info']}]Current directory: {os.getcwd()}\nUsage: /mount <path>[/{get_theme()['info']}]")
                     continue
+                elif cmd == "/workspace":
+                    from tools.workspace_manager import workspace_manager
+                    stats = workspace_manager.workspace_stats()
+                    console.print(f"[{get_theme()['accent']}]Agent Workspace Stats[/{get_theme()['accent']}]")
+                    console.print(f"Usage: [yellow]{stats['total_size_mb']} MB[/yellow] / {stats['max_size_mb']} MB")
+                    
+                    console.print(f"\n[{get_theme()['success']}]Persistent Exports:[/{get_theme()['success']}]")
+                    if stats['persistent_exports']:
+                        for exp in stats['persistent_exports']:
+                            console.print(f"  • {exp}")
+                    else:
+                        console.print("  [dim]None[/dim]")
+                        
+                    console.print(f"\n[{get_theme()['info']}]Active Sessions:[/{get_theme()['info']}]")
+                    if stats['active_sessions']:
+                        for sess in stats['active_sessions']:
+                            console.print(f"  • {sess}")
+                    else:
+                        console.print("  [dim]None[/dim]")
+                    continue
                 elif cmd == "/save":
                     import json
                     filename = f"chat_save_{int(t.time())}.json"
@@ -331,30 +355,36 @@ def start_chat(mode="offline"):
             prefix_text = f"[{theme['agent']}]{model_display}[{agent.mode}] ❯[/{theme['agent']}]"
             console.print(prefix_text)
             
-            full_response = ""
+            stream_buffer = ""
             current_status = ""
             terminal_command = ""
             terminal_output = ""
             tool_steps = []  # Sequential list of tool calls/results to display
             
-            def _build_live_group():
+            def _build_live_group(is_final=False):
                 """Builds the renderable group for the live display."""
                 items = []
                 # Show sequential tool steps
                 for step in tool_steps:
                     items.append(Text.from_markup(step))
                 # Show current running status
-                if current_status:
-                    items.append(Text.from_markup(f" [italic yellow]⚡ {current_status}[/italic yellow]"))
+                if current_status and not is_final:
+                    from rich.spinner import Spinner
+                    clean_status = current_status.replace('⚡ ', '').replace('🤔 ', '')
+                    items.append(Spinner('bouncingBar', text=Text.from_markup(f" [italic {theme.get('accent', 'cyan')}]{clean_status}[/italic {theme.get('accent', 'cyan')}]")))
+                elif current_status and is_final:
+                    clean_status = current_status.replace('⚡ ', '').replace('🤔 ', '')
+                    items.append(Text.from_markup(f" [bold {theme.get('accent', 'cyan')}]{clean_status}[/bold {theme.get('accent', 'cyan')}]"))
+                    
                 # Show terminal output if active
                 if terminal_command:
                     items.append(render_terminal_box(terminal_command, terminal_output))
                 # Show streaming response text
-                if full_response:
-                    items.append(format_response(full_response, theme))
+                if stream_buffer:
+                    items.append(format_response(stream_buffer, theme))
                 return Group(*items) if items else Text("")
             
-            with Live("", console=console, refresh_per_second=15, vertical_overflow="visible") as live:
+            with Live("", console=console, refresh_per_second=15, transient=True, vertical_overflow="visible") as live:
                 try:
                     gen = agent.run(user_input, attachments=attachments.copy())
                     attachments.clear()
@@ -421,7 +451,7 @@ def start_chat(mode="offline"):
                                 elif "Call " in status_raw and "[accent]" in status_raw:
                                     # This is a tool-call status — add as a new sequential step
                                     clean = apply_theme_placeholders(status_raw)
-                                    tool_steps.append(f"  [dim]├─[/dim] {clean} [italic yellow]...[/italic yellow]")
+                                    tool_steps.append(f"  [dim]├─[/dim] {clean} [italic {theme.get('accent', 'yellow')}]...[/italic {theme.get('accent', 'yellow')}]")
                                     current_status = ""
                                     terminal_command = ""
                                 else:
@@ -439,22 +469,22 @@ def start_chat(mode="offline"):
                                     if current_status:
                                         current_status = ""
                                     
-                                    strip_chunk = chunk.strip()
-                                    if strip_chunk and full_response.strip().endswith(strip_chunk) and len(strip_chunk) > 10:
-                                        pass  # Skip duplicate preamble
-                                    else:
-                                        full_response += chunk
+                                    stream_buffer += chunk
+                                    
+                                    in_code = stream_buffer.count("```") % 2 != 0
+                                    in_thought = stream_buffer.count("<thought>") > stream_buffer.count("</thought>")
+                                    
+                                    if not in_code and not in_thought and "\n\n" in stream_buffer:
+                                        parts = stream_buffer.split("\n\n")
+                                        to_print = "\n\n".join(parts[:-1])
+                                        if to_print.strip():
+                                            console.print(format_response(to_print, theme))
+                                        stream_buffer = parts[-1]
                                     
                                     live.update(_build_live_group())
                                 chunk = next(gen)
                     except StopIteration:
-                        # Final paint — only show the response text, tool steps already visible above
-                        if full_response:
-                            live.update(format_response(full_response, theme))
-                        elif current_status:
-                            live.update(Text.from_markup(f" [italic yellow]⚡ {current_status}[/italic yellow]"))
-                        else:
-                            live.update(Text(""))
+                        pass
                 except KeyboardInterrupt:
                     if terminal_command:
                         live.stop()
@@ -464,16 +494,23 @@ def start_chat(mode="offline"):
                         if choice == 'k':
                             terminal_manager.interrupt()
                             console.print("[red]Process Interrupted.[/red]")
-                            break
                         elif choice == 'b':
                             console.print("[green]Process moved to background.[/green]")
-                            break
                         else:
                             live.start()
-                            break
                     else:
-                        live.update(format_response(full_response + " [dim](stopped)[/dim]", theme))
+                        current_status = current_status + " (stopped)" if current_status else "(stopped)"
+                
+                if stream_buffer.strip():
+                    console.print(format_response(stream_buffer, theme))
+                    stream_buffer = ""
+                
+                # Update one last time, though it will vanish immediately due to transient=True
+                # But it prevents race conditions from the spinner rendering a broken frame
+                live.update(_build_live_group(is_final=True))
             
+            # Print the final result purely as text to avoid any resizing layout corruption
+            console.print(_build_live_group(is_final=True))
             console.print()
         except KeyboardInterrupt:
             console.print("\n[bold yellow]Exiting...[/bold yellow]")

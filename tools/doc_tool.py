@@ -1,5 +1,6 @@
 import os
 from tools.registry import tool
+from tools.utils import resolve_workspace_path
 
 @tool(
     name="read_pdf_content",
@@ -77,6 +78,8 @@ def read_docx(file_path: str) -> str:
 )
 def create_docx(file_path: str, content: str, title: str = None) -> str:
     """Creates a DOCX with the given content."""
+    # Route bare filename into the active workspace session's outputs/ folder
+    file_path = resolve_workspace_path(file_path, sub="outputs")
     try:
         from docx import Document
         doc = Document()

@@ -44,8 +44,17 @@ class TerminalManager:
             if len(self.history) > 1000:
                 self.history.pop(0)
 
-    def execute_stream(self, cmd):
-        """Executes a command and yields output line by line."""
+    def execute_stream(self, cmd, cwd: str = None):
+        """Executes a command and yields output line by line.
+        
+        Parameters
+        ----------
+        cmd : str
+            The PowerShell command or script to run.
+        cwd : str, optional
+            If provided, a ``Set-Location`` call is prepended so the command
+            runs from that directory (e.g. the workspace scratch folder).
+        """
         self.is_executing = True
         self.current_marker = f"____DONE_{int(time.time())}____"
         
@@ -53,6 +62,10 @@ class TerminalManager:
         script_path = os.path.join(tempfile.gettempdir(), f"agent_cmd_{id(self)}_{int(time.time())}.ps1")
         try:
             with open(script_path, "w", encoding="utf-8") as f:
+                if cwd:
+                    # Change to the requested directory for this command only
+                    escaped_cwd = cwd.replace("'", "''")
+                    f.write(f"Set-Location '{escaped_cwd}'\n")
                 f.write(cmd)
         except Exception as e:
             yield f"Error writing temp script: {e}\n"
@@ -95,6 +108,7 @@ class TerminalManager:
                 os.remove(script_path)
         except:
             pass
+
 
     def interrupt(self):
         """Sends Ctrl+C to the PowerShell process group."""

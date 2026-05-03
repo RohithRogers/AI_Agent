@@ -17,6 +17,7 @@ from tools import (
     ppt_tool,
     code_tool,
     skill_tool,
+    workspace_tool,
 )
 from remote import telegram_tool
 from CLI.commands import main
